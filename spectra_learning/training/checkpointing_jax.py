@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
+import torch
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
@@ -306,6 +307,33 @@ def restore_jax_encoder_state(
     encoder_state: nnx.State,
 ) -> nnx.State:
     return restore_frozen_teacher_encoder(checkpoint_path, encoder_state)
+
+
+def torch_encoder_state_dict_from_jax(
+    encoder_state: nnx.State,
+) -> dict[str, torch.Tensor]:
+    state_dict = {}
+    for path, value in nnx.to_flat_state(encoder_state):
+        parts = [str(part) for part in path]
+        tensor = torch.from_numpy(np.array(value))
+        if parts[-2:] == ["fc12", "weight"]:
+            prefix = ".".join(parts[:-2])
+            fc1, fc2 = tensor.chunk(2, dim=0)
+            state_dict[f"{prefix}.fc1.weight"] = fc1
+            state_dict[f"{prefix}.fc2.weight"] = fc2
+        elif parts[:3] == ["embedder", "mz_ffn", "layers"]:
+            layer = 2 * int(parts[3])
+            state_dict[f"embedder.mz_ffn.{layer}.{parts[4]}"] = tensor
+        elif parts[:2] == ["embedder", "raw_ffn"]:
+            layer = 2 * int(parts[2])
+            state_dict[f"embedder.raw_ffn.{layer}.{parts[3]}"] = tensor
+        elif parts[:2] == ["metadata_embedder", "linear0"]:
+            state_dict[f"metadata_embedder.0.{parts[2]}"] = tensor
+        elif parts[:2] == ["metadata_embedder", "linear2"]:
+            state_dict[f"metadata_embedder.2.{parts[2]}"] = tensor
+        else:
+            state_dict[".".join(parts)] = tensor
+    return state_dict
 
 
 def jax_training_checkpoint_metadata(

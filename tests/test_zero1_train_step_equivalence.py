@@ -16,8 +16,11 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 _SCRIPT = """
 import jax
+import sys
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
@@ -64,6 +67,14 @@ overrides = {
     "weight_decay": 0.1,
     "grad_clip_norm": 1.0,
 }
+frozen_teacher = sys.argv[1] == 'frozen_bf16'
+if frozen_teacher:
+    overrides.update(
+        training_mode='mae_teacher_jepa', optimizer='adam',
+        optimizer_state_dtype='bf16', weight_decay=0.0,
+        masked_token_loss_weight=1.0, mae_loss_weight=0.0,
+        contrastive_loss_weight=0.0, online_probe_loss_weight=0.0,
+    )
 config = load_config(
     "configs/1b_singlemixer_dense_adamw_metadata_adaln_multiscale_n128_b2048_500k_hd256.py",
     overrides,
@@ -103,7 +114,12 @@ def run(zero1_shards, mode='flat'):
     if zero1_shards:
         init = zero1_flat_init if mode == 'flat' else zero1_adam_init_sharded
         opt_state = init(
-            params, shards=zero1_shards, mesh=mesh, shard_axis=JAX_DATA_AXIS
+            params, shards=zero1_shards, mesh=mesh, shard_axis=JAX_DATA_AXIS,
+            moment_dtype=jnp.bfloat16 if frozen_teacher else jnp.float32,
+        )
+        assert all(
+            x.dtype == (jnp.bfloat16 if frozen_teacher else jnp.float32)
+            for x in jax.tree.leaves(opt_state.mu)
         )
     else:
         opt_state = _replicate_tree_on_data_mesh(opt_state, mesh)
@@ -139,14 +155,15 @@ print("EQUIVALENT")
 """
 
 
-def test_zero1_train_step_matches_replicated_train_step() -> None:
+@pytest.mark.parametrize('recipe', ('mae_fp32', 'frozen_bf16'))
+def test_zero1_train_step_matches_replicated_train_step(recipe: str) -> None:
     environment = {
         **os.environ,
         "JAX_PLATFORMS": "cpu",
         "XLA_FLAGS": "--xla_force_host_platform_device_count=4",
     }
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(_SCRIPT)],
+        [sys.executable, "-c", textwrap.dedent(_SCRIPT), recipe],
         capture_output=True,
         text=True,
         env=environment,

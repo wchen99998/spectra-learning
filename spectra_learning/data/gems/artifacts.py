@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from spectra_learning.data.gems.randomness import INPUT_RANDOMNESS_VERSION
+
 MASSIVE_V2_HDF5_FORMAT = "spectra_learning.massive_v2_ms2_shards.v1"
 
 
@@ -89,16 +91,8 @@ def _batch_count(
     rows_per_block: int,
     drop_last: bool,
 ) -> int:
-    block_rows = rows_per_block
-    if block_rows == 0:
-        block_rows = math.ceil(batch_size / chunk_rows) * chunk_rows
-    block_rows = max(chunk_rows, block_rows)
-    full_blocks, tail = divmod(rows, block_rows)
-    if drop_last:
-        return full_blocks * (block_rows // batch_size) + tail // batch_size
-    return full_blocks * math.ceil(block_rows / batch_size) + math.ceil(
-        tail / batch_size
-    )
+    del chunk_rows, rows_per_block
+    return rows // batch_size if drop_last else math.ceil(rows / batch_size)
 
 
 def _assign_shards(
@@ -107,32 +101,15 @@ def _assign_shards(
     world_size: int,
     seed: int,
     split: str,
-    batch_size: int,
-    rows_per_block: int,
-    drop_last: bool,
-    required_batches: int | None,
 ) -> tuple[tuple[GemsHdf5Shard, ...], ...]:
+    # Every training shard participates, including in short runs. Host ownership
+    # depends on corpus/seed/topology, never on optimizer batching or run length.
     assignments: list[list[GemsHdf5Shard]] = [[] for _ in range(world_size)]
     eligible_rows = [0] * world_size
-    batch_counts = [0] * world_size
     for shard in _seeded_shard_order(shards, seed=seed, split=split):
-        rank = min(
-            range(world_size),
-            key=lambda item: (eligible_rows[item], item),
-        )
+        rank = min(range(world_size), key=lambda item: (eligible_rows[item], item))
         assignments[rank].append(shard)
         eligible_rows[rank] += shard.eligible_rows
-        batch_counts[rank] += _batch_count(
-            shard.eligible_rows,
-            batch_size=batch_size,
-            chunk_rows=shard.chunk_rows,
-            rows_per_block=rows_per_block,
-            drop_last=drop_last,
-        )
-        if required_batches is not None and all(
-            count >= required_batches for count in batch_counts
-        ):
-            break
     return tuple(tuple(shards) for shards in assignments)
 
 
@@ -203,26 +180,11 @@ def plan_massive_v2_shards(
         for shard in _manifest_shards(manifest, "validation")
         if shard.eligible_rows
     )
-    train_eligible_rows = int(manifest["splits"]["train"]["eligible_rows"])
-    requested_train_rows = (
-        train_eligible_rows
-        if training_max_steps is None
-        else training_max_steps * global_batch_size
-    )
-    required_train_batches = (
-        None
-        if requested_train_rows >= train_eligible_rows
-        else training_max_steps * gradient_accumulation_steps
-    )
     train_assignments = _assign_shards(
         train_shards,
         world_size=world_size,
         seed=seed,
         split="train",
-        batch_size=local_batch_size,
-        rows_per_block=rows_per_block,
-        drop_last=drop_remainder,
-        required_batches=required_train_batches,
     )
     validation_assignments = _assign_validation_shards(
         validation_shards,
@@ -236,12 +198,7 @@ def plan_massive_v2_shards(
         "format": MASSIVE_V2_HDF5_FORMAT,
         "world_size": world_size,
         "seed": seed,
-        "global_batch_size": global_batch_size,
-        "gradient_accumulation_steps": gradient_accumulation_steps,
-        "rows_per_block": rows_per_block,
-        "drop_remainder": drop_remainder,
-        "training_max_steps": training_max_steps,
-        "val_num_steps": val_num_steps,
+        "input_randomness_version": INPUT_RANDOMNESS_VERSION,
         "validation_batch_partition": "shard_peer_stride_v1",
         "train": [
             [shard.path for shard in assignment] for assignment in train_assignments

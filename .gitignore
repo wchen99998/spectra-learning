@@ -40,3 +40,9 @@ tmp/
 *.pth
 *.ckpt
 singlefile
+
+# One-off run investigations: per-run artifact dumps (wandb history CSVs, plots,
+# SkyPilot launch/monitoring records) and the reports that narrate them.
+docs/benchmarks/*/
+docs/frozen_jepa_loss_investigation_20260905.md
+docs/frozen_jepa_salt_audit_20260905.md

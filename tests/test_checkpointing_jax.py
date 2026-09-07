@@ -20,6 +20,7 @@ from ml_collections import config_dict
 from types import SimpleNamespace
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.checkpointing_jax import (
@@ -29,6 +30,7 @@ from spectra_learning.training.checkpointing_jax import (
     restore_frozen_teacher_encoder,
     restore_jax_training_state,
     save_jax_training_state,
+    torch_encoder_state_dict_from_jax,
 )
 from spectra_learning.training.logging import MetricLogger
 from spectra_learning.training.pretrain_jax import (
@@ -506,6 +508,26 @@ def test_restore_frozen_teacher_encoder_fuses_split_swiglu_checkpoint(tmp_path):
     actual = dict(nnx.to_flat_state(restored))
     for path in expected:
         np.testing.assert_array_equal(np.asarray(actual[path]), np.asarray(expected[path]))
+
+
+def test_torch_encoder_state_dict_from_jax() -> None:
+    settings = PeakSetJEPASettings.create(
+        **_tiny_mae_kwargs(),
+        encoder_fourier_mlp_num_layers=4,
+        encoder_metadata_schema="massive_v2_acquisition_v1",
+        encoder_metadata_conditioning="adaln_zero",
+        encoder_metadata_condition_dim=8,
+    )
+    torch_model = PeakSetJEPA(settings)
+    jax_model = PeakSetJEPAJax(settings, rngs=nnx.Rngs(7))
+    jax_model.encoder.load_torch_state_dict(torch_model.state_dict(), "encoder")
+
+    converted = torch_encoder_state_dict_from_jax(nnx.state(jax_model.encoder))
+    expected = torch_model.encoder.state_dict()
+
+    assert converted.keys() == expected.keys()
+    for key in expected:
+        torch.testing.assert_close(converted[key], expected[key])
 
 
 def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_path):

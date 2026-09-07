@@ -477,8 +477,9 @@ class SpectraARGemsDataModule(GemsDataModule):
 
     def _collator(
         self, *, augment: bool, metadata_dropout: bool = False,
+        epoch: int = 0, split: str = "train",
     ) -> SpectraARGemsBatchCollator:
-        del augment, metadata_dropout
+        del augment, metadata_dropout, epoch, split
         return SpectraARGemsBatchCollator(
             tokenizer=self.ar_tokenizer,
             num_peaks=self.num_peaks_output,

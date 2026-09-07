@@ -133,6 +133,9 @@ echo "Coordinator ${JAX_COORDINATOR_ADDRESS}"
 echo "TPU worker ${TPU_WORKER_ID}: ${TPU_WORKER_HOSTNAMES}"
 echo "GeMS data rank ${SPECTRA_GEMS_RANK}/${SKYPILOT_NUM_NODES}"
 echo "Workdir ${SPECTRA_WORKDIR}"
+# SkyPilot uses an interactive shell. Disable job control so the background
+# setsid process does not fork away from the PID whose exit status we wait on.
+set +m
 TRAIN_PID=""
 terminate_training_process_group() {
   if [[ -z "${TRAIN_PID}" ]]; then
@@ -163,7 +166,13 @@ setsid .venv/bin/python train.py \\
   --overrides-json "${SPECTRA_CONFIG_JSON}" \\
   --metrics-json "${METRICS_JSON}" &
 TRAIN_PID=$!
+set +e
 wait "${TRAIN_PID}"
+TRAIN_STATUS=$?
+set -e
+terminate_training_process_group
+TRAIN_PID=""
+exit "${TRAIN_STATUS}"
 """
 
 
@@ -308,8 +317,9 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--region",
         default="",
         help=(
-            f"GCP region for SkyPilot resources. Defaults to {DEFAULT_REGION}. "
-            "Equivalent to --infra gcp/<region>."
+            "GCP region for SkyPilot resources. TPU v6e defaults to all "
+            f"supported regions; TPU7x defaults to {DEFAULT_REGION}. Equivalent "
+            "to --infra gcp/<region>."
         ),
     )
     parser.add_argument("--infra", default="")
@@ -348,6 +358,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     args.region, args.infra = resolve_region_and_infra(
         region=args.region,
         infra=args.infra,
+        tpu_generation=args.tpu_generation,
         parser=parser,
     )
     if sky_args and sky_args[0] == "--":
@@ -359,6 +370,7 @@ def resolve_region_and_infra(
     *,
     region: str,
     infra: str,
+    tpu_generation: str,
     parser: argparse.ArgumentParser,
 ) -> tuple[str, str]:
     raw_region = region.strip()
@@ -367,6 +379,8 @@ def resolve_region_and_infra(
         parser.error("--region cannot be empty")
     infra = infra.strip()
     if not region and not infra:
+        if tpu_generation == "v6e":
+            return "", "gcp"
         return DEFAULT_REGION, DEFAULT_INFRA
     if region and not infra:
         return region, f"gcp/{region}"

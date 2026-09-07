@@ -99,10 +99,11 @@ def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
 
 def pretrain_checkpoint_dataset_metadata(
     datamodule: GemsDataModule,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     if datamodule.artifact.format != MASSIVE_V2_HDF5_FORMAT:
         return None
     return {
+        "input_contract": datamodule.info["gems_input_contract"],
         "format": datamodule.info["gems_hdf5_format"],
         "repo_id": datamodule.info["gems_hdf5_repo_id"],
         "revision": datamodule.info["gems_hdf5_revision"],

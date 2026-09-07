@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.models.encoder_jax import PeakSetEncoder as JaxPeakSetEncoder
+from spectra_learning.models.spectrum_metadata import MASSIVE_V2_CONDITION_DIM
 from spectra_learning.models.common_jax import RMSNorm
 from spectra_learning.models.pairmixer_jax import (
     PairMixerBlock as JaxPairMixerBlock,
@@ -1383,3 +1385,66 @@ def test_jax_mae_teacher_jepa_matches_pytorch_with_teacher_config():
         jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_mae_teacher_jepa_fastmixer_uses_shared_acquisition_metadata(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        teacher_config_path = f"{tmpdir}/teacher_config.py"
+        with open(teacher_config_path, "w") as f:
+            f.write(
+                "from ml_collections import config_dict\n"
+                "def get_config():\n"
+                "    cfg = config_dict.ConfigDict()\n"
+                "    cfg.training_mode = 'mae'\n"
+                "    cfg.model_dim = 16\n"
+                "    cfg.encoder_num_layers = 1\n"
+                "    cfg.encoder_num_heads = 4\n"
+                "    cfg.attention_mlp_multiple = 2.0\n"
+                "    cfg.feature_mlp_hidden_dim = 8\n"
+                "    cfg.encoder_fourier_num_freqs = 4\n"
+                "    cfg.pairmixer_fourier_num_freqs = 2\n"
+                "    cfg.pairmixer_pair_dim = 12\n"
+                "    cfg.pairmixer_pair_feature_hidden_dim = 8\n"
+                "    cfg.pairmixer_block_type = 'fastmixer-dense'\n"
+                "    cfg.num_peaks = 5\n"
+                "    cfg.encoder_metadata_schema = 'massive_v2_acquisition_v1'\n"
+                "    cfg.encoder_metadata_conditioning = 'adaln_zero'\n"
+                "    cfg.encoder_metadata_condition_dim = 8\n"
+                "    return cfg\n"
+            )
+        model = PeakSetJEPAJax(
+            **_small_jepa_kwargs(
+                training_mode="mae_teacher_jepa",
+                frozen_teacher_config_path=teacher_config_path,
+                pairmixer_block_type="fastmixer-dense",
+                encoder_metadata_schema="massive_v2_acquisition_v1",
+                encoder_metadata_conditioning="adaln_zero",
+                encoder_metadata_condition_dim=8,
+            )
+        )
+        batch = _jax_batch(_real_pattern_batch("random"))
+        metadata = jnp.arange(
+            batch["peak_mz"].shape[0] * MASSIVE_V2_CONDITION_DIM,
+            dtype=jnp.float32,
+        ).reshape(-1, MASSIVE_V2_CONDITION_DIM) / 100.0
+        batch["spectrum_metadata"] = metadata
+        conditioned_encoders = []
+        forward_blocks = JaxPeakSetEncoder._forward_single_blocks
+
+        def check_condition(encoder, x, token_mask, positions=None, condition=None):
+            # Check the condition actually reaches the backbone, rather than
+            # only checking that a forward pass with metadata is finite.
+            np.testing.assert_allclose(
+                np.asarray(condition),
+                np.asarray(encoder.metadata_embedder(metadata)),
+            )
+            conditioned_encoders.append(encoder)
+            return forward_blocks(encoder, x, token_mask, positions, condition)
+
+        monkeypatch.setattr(JaxPeakSetEncoder, "_forward_single_blocks", check_condition)
+        metrics = model(batch)
+        assert len(conditioned_encoders) == 2
+        assert any(encoder is model.teacher_encoder for encoder in conditioned_encoders)
+        assert any(encoder is model.encoder for encoder in conditioned_encoders)
+
+    assert np.isfinite(np.asarray(metrics["loss"]))

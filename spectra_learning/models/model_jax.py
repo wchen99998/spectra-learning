@@ -62,6 +62,73 @@ class TargetProjector(nnx.Module):
         self.linear2.load_torch_state_dict(state_dict, f"{prefix}.2")
 
 
+def build_peak_set_encoder_jax(
+    cfg: PeakSetJEPASettings,
+    *,
+    compute_dtype: object,
+    pairmixer_block_type: str,
+    pairmixer_fast_encoder_max_visible_tokens: int | None,
+    rngs: nnx.Rngs,
+) -> PeakSetEncoder:
+    return PeakSetEncoder(
+        model_dim=cfg.model_dim,
+        embedder=PeakFeatureEmbedder(
+            model_dim=cfg.model_dim,
+            hidden_dim=cfg.feature_mlp_hidden_dim,
+            fourier_mlp_hidden_dim=cfg.encoder_fourier_mlp_hidden_dim,
+            fourier_mlp_num_layers=cfg.encoder_fourier_mlp_num_layers,
+            fourier_x_min=cfg.encoder_fourier_x_min,
+            fourier_x_max=cfg.encoder_fourier_x_max,
+            fourier_num_freqs=cfg.encoder_fourier_num_freqs,
+            mz_scale=cfg.encoder_mz_scale,
+            mz_embedding=cfg.encoder_mz_embedding,
+            token_bin_size=cfg.encoder_mz_token_bin_size,
+            token_embedding_dim=cfg.encoder_mz_token_embedding_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        ),
+        num_layers=cfg.encoder_num_layers,
+        num_heads=cfg.encoder_num_heads,
+        attention_mlp_multiple=cfg.attention_mlp_multiple,
+        norm_eps=cfg.norm_eps,
+        use_position_embedding=cfg.encoder_use_position_embedding,
+        apply_final_norm=cfg.encoder_apply_final_norm,
+        apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
+        num_peaks=cfg.num_peaks,
+        use_cls_token=cfg.encoder_use_cls_token,
+        use_pair_path=encoder_uses_pair_path(cfg),
+        pairmixer_block_type=pairmixer_block_type,
+        pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
+        pair_dim=cfg.pairmixer_pair_dim,
+        pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
+        pairmixer_dropout=cfg.pairmixer_dropout,
+        pairmixer_use_pair_bias=cfg.pairmixer_use_pair_bias,
+        pairmixer_mz_scale=cfg.pairmixer_mz_scale,
+        pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
+        pairmixer_mz_embedding=cfg.pairmixer_mz_embedding,
+        pairmixer_mz_token_bin_size=cfg.pairmixer_mz_token_bin_size,
+        pairmixer_mz_token_embedding_dim=cfg.pairmixer_mz_token_embedding_dim,
+        pairmixer_fourier_num_freqs=cfg.pairmixer_fourier_num_freqs,
+        pairmixer_fourier_x_min=cfg.pairmixer_fourier_x_min,
+        pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
+        pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
+        pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
+        metadata_schema=cfg.encoder_metadata_schema,
+        metadata_conditioning=cfg.encoder_metadata_conditioning,
+        metadata_condition_dim=cfg.encoder_metadata_condition_dim,
+        pairmixer_fast_max_visible_tokens=(
+            pairmixer_fast_encoder_max_visible_tokens
+        ),
+        activation_checkpoint_mode=cfg.activation_checkpoint_mode,
+        activation_checkpoint_every_n_layers=(
+            cfg.activation_checkpoint_every_n_layers
+        ),
+        activation_checkpoint_modules=cfg.activation_checkpoint_modules,
+        compute_dtype=compute_dtype,
+        rngs=rngs,
+    )
+
+
 class PeakSetJEPAJax(nnx.Module):
     def __init__(
         self,
@@ -330,61 +397,13 @@ class PeakSetJEPAJax(nnx.Module):
         )
 
     def _build_encoder(self, cfg: PeakSetJEPASettings, rngs: nnx.Rngs) -> PeakSetEncoder:
-        return PeakSetEncoder(
-            model_dim=cfg.model_dim,
-            embedder=PeakFeatureEmbedder(
-                model_dim=cfg.model_dim,
-                hidden_dim=cfg.feature_mlp_hidden_dim,
-                fourier_mlp_hidden_dim=cfg.encoder_fourier_mlp_hidden_dim,
-                fourier_mlp_num_layers=cfg.encoder_fourier_mlp_num_layers,
-                fourier_x_min=cfg.encoder_fourier_x_min,
-                fourier_x_max=cfg.encoder_fourier_x_max,
-                fourier_num_freqs=cfg.encoder_fourier_num_freqs,
-                mz_scale=cfg.encoder_mz_scale,
-                mz_embedding=cfg.encoder_mz_embedding,
-                token_bin_size=cfg.encoder_mz_token_bin_size,
-                token_embedding_dim=cfg.encoder_mz_token_embedding_dim,
-                compute_dtype=self.compute_dtype,
-                rngs=rngs,
-            ),
-            num_layers=cfg.encoder_num_layers,
-            num_heads=cfg.encoder_num_heads,
-            attention_mlp_multiple=cfg.attention_mlp_multiple,
-            norm_eps=cfg.norm_eps,
-            use_position_embedding=cfg.encoder_use_position_embedding,
-            apply_final_norm=cfg.encoder_apply_final_norm,
-            apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
-            num_peaks=cfg.num_peaks,
-            use_cls_token=cfg.encoder_use_cls_token,
-            use_pair_path=encoder_uses_pair_path(cfg),
+        return build_peak_set_encoder_jax(
+            cfg,
+            compute_dtype=self.compute_dtype,
             pairmixer_block_type=self.pairmixer_block_type,
-            pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
-            pair_dim=cfg.pairmixer_pair_dim,
-            pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
-            pairmixer_dropout=cfg.pairmixer_dropout,
-            pairmixer_use_pair_bias=cfg.pairmixer_use_pair_bias,
-            pairmixer_mz_scale=cfg.pairmixer_mz_scale,
-            pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
-            pairmixer_mz_embedding=cfg.pairmixer_mz_embedding,
-            pairmixer_mz_token_bin_size=cfg.pairmixer_mz_token_bin_size,
-            pairmixer_mz_token_embedding_dim=cfg.pairmixer_mz_token_embedding_dim,
-            pairmixer_fourier_num_freqs=cfg.pairmixer_fourier_num_freqs,
-            pairmixer_fourier_x_min=cfg.pairmixer_fourier_x_min,
-            pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
-            pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
-            pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
-            metadata_schema=cfg.encoder_metadata_schema,
-            metadata_conditioning=cfg.encoder_metadata_conditioning,
-            metadata_condition_dim=cfg.encoder_metadata_condition_dim,
-            pairmixer_fast_max_visible_tokens=(
+            pairmixer_fast_encoder_max_visible_tokens=(
                 self.pairmixer_fast_encoder_max_visible_tokens
             ),
-            activation_checkpoint_mode=cfg.activation_checkpoint_mode,
-            activation_checkpoint_every_n_layers=(
-                cfg.activation_checkpoint_every_n_layers
-            ),
-            activation_checkpoint_modules=cfg.activation_checkpoint_modules,
-            compute_dtype=self.compute_dtype,
             rngs=rngs,
         )
 

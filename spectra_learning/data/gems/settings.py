@@ -20,9 +20,7 @@ from spectra_learning.data.spectra import (
 
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
-DEFAULT_GEMS_HDF5_REPO_ID = (
-    "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
-)
+DEFAULT_GEMS_HDF5_REPO_ID = "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
 DEFAULT_GEMS_HDF5_REVISION = "4de48add4e687f6ea561dc6ec74f8984ad8aebe0"
 DEFAULT_GEMS_HDF5_MANIFEST = "manifest.json"
 NUM_PEAKS_OUTPUT = DEFAULT_NUM_PEAKS
@@ -46,10 +44,7 @@ class GemsDataConfig:
     gems_hdf5_retention_time_dataset: str
     gems_hdf5_ms_level_dataset: str
     gems_hdf5_rows_per_block: int
-    gems_hdf5_active_shards: int
-    gems_hdf5_mix_blocks_per_batch: int
-    gems_hdf5_mix_pool_blocks: int
-    gems_hdf5_mix_lanes_per_residency: int
+    gems_hdf5_shuffle_window_blocks: int
     gems_hdf5_shuffle_seed: int | None
     batch_size: int
     gradient_accumulation_steps: int
@@ -91,6 +86,17 @@ class GemsDataConfig:
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "GemsDataConfig":
+        removed = {
+            "gems_hdf5_active_shards",
+            "gems_hdf5_mix_blocks_per_batch",
+            "gems_hdf5_mix_pool_blocks",
+            "gems_hdf5_mix_lanes_per_residency",
+        }
+        obsolete = removed.intersection(config)
+        if obsolete:
+            raise ValueError(
+                f"Removed input settings: {sorted(obsolete)}; use gems_hdf5_shuffle_window_blocks"
+            )
         artifact_dir = (
             Path(config.get("artifact_dir", str(DEFAULT_ARTIFACT_DIR)))
             .expanduser()
@@ -100,8 +106,7 @@ class GemsDataConfig:
             config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
         )
         jepa_mask_lengths = tuple(
-            int(length)
-            for length in config.get("jepa_mask_lengths", (1, 2, 4, 8, 16))
+            int(length) for length in config.get("jepa_mask_lengths", (1, 2, 4, 8, 16))
         )
         dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
         return cls(
@@ -136,20 +141,9 @@ class GemsDataConfig:
             gems_hdf5_ms_level_dataset=str(
                 config.get("gems_hdf5_ms_level_dataset", "MS level")
             ),
-            gems_hdf5_rows_per_block=int(
-                config.get("gems_hdf5_rows_per_block", 0)
-            ),
-            gems_hdf5_active_shards=int(
-                config.get("gems_hdf5_active_shards", 1)
-            ),
-            gems_hdf5_mix_blocks_per_batch=int(
-                config.get("gems_hdf5_mix_blocks_per_batch", 1)
-            ),
-            gems_hdf5_mix_pool_blocks=int(
-                config.get("gems_hdf5_mix_pool_blocks", 0)
-            ),
-            gems_hdf5_mix_lanes_per_residency=int(
-                config.get("gems_hdf5_mix_lanes_per_residency", 0)
+            gems_hdf5_rows_per_block=int(config.get("gems_hdf5_rows_per_block", 0)),
+            gems_hdf5_shuffle_window_blocks=int(
+                config.get("gems_hdf5_shuffle_window_blocks", 2048)
             ),
             gems_hdf5_shuffle_seed=(
                 None
@@ -179,12 +173,8 @@ class GemsDataConfig:
                 )
             ),
             jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
-            jepa_context_fraction=float(
-                config.get("jepa_context_fraction", 0.5)
-            ),
-            jepa_target_fraction=float(
-                config.get("jepa_target_fraction", 0.25)
-            ),
+            jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
+            jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
             jepa_block_min_len=int(config.get("jepa_block_min_len", 1)),
             jepa_mask_strategy=_config_mask_strategy(
                 config.get("jepa_mask_strategy", "contiguous")
@@ -229,9 +219,7 @@ class GemsDataConfig:
                 config.get("dataloader_pin_memory", torch.cuda.is_available())
             ),
             dataloader_num_workers=dataloader_num_workers,
-            dataloader_prefetch_factor=int(
-                config.get("dataloader_prefetch_factor", 2)
-            ),
+            dataloader_prefetch_factor=int(config.get("dataloader_prefetch_factor", 2)),
             dataloader_persistent_workers=bool(
                 config.get(
                     "dataloader_persistent_workers",

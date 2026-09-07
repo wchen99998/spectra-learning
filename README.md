@@ -93,8 +93,10 @@ that training will use:
 Replace rank 0 with that host's data rank. `SPECTRA_GEMS_RANK`, when set, selects
 the staged data assignment for every JAX task; otherwise JAX's process index is
 used. Training validates local files and performs no downloads. Staging owns
-download locks. Whole-shard assignments, rolling-pool mixing, lane selection,
-group membership, and resume offsets retain their existing algorithms.
+download locks. Every training shard is assigned, including for short runs.
+Training shuffles individual rows in randomly ordered block windows; block sizes
+and sample order are independent of gradient accumulation. Masks and views use
+identity-based seeds, independent of worker scheduling and loader restarts.
 Grouped entities use `(massive_id, global_group_id)` as their corpus-wide
 identity and never cross train/validation or output-shard boundaries.
 

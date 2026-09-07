@@ -4,6 +4,7 @@ from typing import Any
 
 from ml_collections import config_dict
 from torch.utils.data import DataLoader
+from torch import Generator
 
 from spectra_learning.data.gems.artifacts import (
     resolve_gems_hdf5_artifact,
@@ -18,6 +19,7 @@ from spectra_learning.data.gems.eligibility import (
     massive_v2_eligibility_contract,
 )
 from spectra_learning.data.gems.hdf5 import MassiveV2Hdf5ShardDataset
+from spectra_learning.data.gems.randomness import data_seed, INPUT_RANDOMNESS_VERSION
 from spectra_learning.data.gems.sampling import (
     ChunkedDistributedBatchSampler,
     LimitBatchSampler,
@@ -159,6 +161,8 @@ class GemsDataModule:
             spectrum_dataset=self.config.gems_hdf5_spectrum_dataset,
             precursor_dataset=self.config.gems_hdf5_precursor_dataset,
             split=split,
+            cache_blocks=self.config.gems_hdf5_shuffle_window_blocks,
+            rows_per_block=self.config.gems_hdf5_rows_per_block or None,
             metadata_keys=("collision_energy", "charge")
             + (
                 ACQUISITION_METADATA_KEYS
@@ -266,6 +270,13 @@ class GemsDataModule:
         train_split = manifest["splits"]["train"]
         validation_split = manifest["splits"]["validation"]
         return {
+            "gems_input_contract": {
+                "version": INPUT_RANDOMNESS_VERSION,
+                "seed": self.seed,
+                "shuffle_seed": self.gems_hdf5_shuffle_seed,
+                "window_blocks": self.gems_hdf5_shuffle_window_blocks,
+                "rows_per_block": self.gems_hdf5_rows_per_block,
+            },
             "artifact_dir": str(self.output_dir),
             "gems_dir": str(self.gems_dir),
             "gems_manifest": str(self.gems_manifest),
@@ -301,22 +312,14 @@ class GemsDataModule:
         }
 
     def _train_steps(self) -> int:
-        samplers = [
-            self._make_batch_sampler(
-                shuffle=True,
-                seed=self.seed,
-                drop_last=self.drop_remainder,
-                epoch=0,
-                rank=rank,
-                split="train",
-            )
+        rows = min(
+            sum(shard.eligible_rows for shard in self.artifact.train_shards(rank))
             for rank in range(self.distributed_world_size)
-        ]
-        micro_batches = min(
-            len(sampler)
-            if self.gems_hdf5_mix_pool_blocks or self.distributed_world_size == 1
-            else sampler.full_batch_count
-            for sampler in samplers
+        )
+        micro_batches = (
+            rows // self.batch_size
+            if self.drop_remainder
+            else (rows + self.batch_size - 1) // self.batch_size
         )
         return micro_batches // self.gradient_accumulation_steps
 
@@ -374,17 +377,11 @@ class GemsDataModule:
             drop_last=drop_last,
             world_size=sampler_world_size,
             rank=sampler_rank,
-            shuffle_segments=True,
             partition_batches=partition_batches,
-            active_segments=(self.gems_hdf5_active_shards if split == "train" else 1),
-            mix_blocks_per_batch=(
-                self.gems_hdf5_mix_blocks_per_batch if split == "train" else 1
-            ),
-            mix_pool_blocks=(self.gems_hdf5_mix_pool_blocks if split == "train" else 0),
-            mix_lanes_per_residency=(
-                self.gems_hdf5_mix_lanes_per_residency if split == "train" else 0
-            ),
+            shuffle_window_blocks=self.gems_hdf5_shuffle_window_blocks,
         )
+        if split == "train":
+            sampler.seed = data_seed(sampler.seed, "training-partition", rank)
         sampler.set_epoch(epoch)
         return sampler
 
@@ -427,8 +424,14 @@ class GemsDataModule:
         return self._loader_for_sampler(
             split=split,
             batch_sampler=batch_sampler,
-            collator=self._collator(augment=augment, metadata_dropout=split == "train"),
+            collator=self._collator(
+                augment=augment,
+                metadata_dropout=split == "train",
+                epoch=epoch,
+                split=split,
+            ),
             num_workers=resolved_num_workers,
+            epoch=epoch,
         )
 
     def _loader_for_sampler(
@@ -438,6 +441,7 @@ class GemsDataModule:
         batch_sampler: Any,
         collator: Any,
         num_workers: int | None = None,
+        epoch: int = 0,
     ) -> DataLoader:
         workers = self.dataloader_num_workers if num_workers is None else num_workers
         dataset = self._get_dataset(split)
@@ -451,6 +455,11 @@ class GemsDataModule:
             "num_workers": workers,
             "pin_memory": self.dataloader_pin_memory,
             "collate_fn": collator,
+            "generator": Generator().manual_seed(
+                data_seed(
+                    self.seed, "worker-bootstrap", split, epoch, self.distributed_rank
+                )
+            ),
         }
         if workers > 0:
             kwargs["persistent_workers"] = self.dataloader_persistent_workers
@@ -466,6 +475,8 @@ class GemsDataModule:
         *,
         augment: bool,
         metadata_dropout: bool = False,
+        epoch: int = 0,
+        split: str = "train",
     ) -> GemsBatchCollator:
         collator_type = (
             SJEPABatchCollator if self.training_mode == "sjepa" else GemsBatchCollator
@@ -481,6 +492,9 @@ class GemsDataModule:
             else {}
         )
         return collator_type(
+            augmentation_seed=self.seed if split == "train" else 42,
+            augmentation_epoch=epoch,
+            augmentation_split=split,
             augment=augment,
             num_target_blocks=self.jepa_num_target_blocks,
             context_fraction=self.jepa_context_fraction,

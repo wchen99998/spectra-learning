@@ -1,3 +1,4 @@
+from spectra_learning.data.gems.randomness import data_seed, sample_rng
 from typing import Any
 
 import numpy as np
@@ -88,7 +89,13 @@ class GemsBatchCollator:
         output_format: str = "torch",
         spectrum_metadata_schema: str | None = None,
         spectrum_metadata_dropout_probability: float = 0.0,
+        augmentation_seed: int | None = None,
+        augmentation_epoch: int = 0,
+        augmentation_split: str = "train",
     ) -> None:
+        self.augmentation_seed = augmentation_seed
+        self.augmentation_epoch = augmentation_epoch
+        self.augmentation_split = augmentation_split
         self.augment = augment
         self.num_target_blocks = num_target_blocks
         self.context_fraction = context_fraction
@@ -128,6 +135,7 @@ class GemsBatchCollator:
         if self.augment:
             batch = self._replace_rows_without_context_and_targets(batch)
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
+        batch.pop("_sample_id", None)
         return format_batch(batch, self.output_format)
 
     def _replace_rows_without_context_and_targets(
@@ -185,6 +193,10 @@ class GemsBatchCollator:
         )
         self._add_numpy_spectrum_metadata(batch, samples)
         torch_batch = {key: torch.from_numpy(value) for key, value in batch.items()}
+        if self.augmentation_seed is not None and "sample_id" in samples:
+            torch_batch["_sample_id"] = torch.from_numpy(
+                np.asarray(samples["sample_id"], dtype=np.uint64).view(np.int64)
+            )
         self._add_condition_vector(torch_batch)
         return torch_batch
 
@@ -262,21 +274,55 @@ class GemsBatchCollator:
                 [torch.as_tensor(sample[key]) for sample in samples]
             ).to(dtype=torch.float32)
 
+    def _sample_seed(self, sample_id: int, operation: str, view: int = 0) -> int:
+        return data_seed(
+            self.augmentation_seed,
+            self.augmentation_epoch,
+            self.augmentation_split,
+            sample_id,
+            operation,
+            view,
+        )
+
     def _add_condition_vector(self, batch: dict[str, torch.Tensor]) -> None:
         if self.spectrum_metadata_schema != MASSIVE_V2_ACQUISITION_SCHEMA:
             return
         metadata = torch_massive_v2_condition_from_batch(batch)
         if self.spectrum_metadata_dropout_probability > 0.0:
-            metadata = drop_massive_v2_metadata_torch(
-                metadata,
-                self.spectrum_metadata_dropout_probability,
-            )
+            if "_sample_id" in batch:
+                rows = []
+                for i, sample_id in enumerate(batch["_sample_id"].tolist()):
+                    with sample_rng(self._sample_seed(sample_id, "metadata")):
+                        rows.append(
+                            drop_massive_v2_metadata_torch(
+                                metadata[i : i + 1],
+                                self.spectrum_metadata_dropout_probability,
+                            )
+                        )
+                metadata = torch.cat(rows)
+            else:
+                metadata = drop_massive_v2_metadata_torch(
+                    metadata, self.spectrum_metadata_dropout_probability
+                )
         batch["spectrum_metadata"] = metadata
 
     def _sample_masks(
         self,
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if "_sample_id" in batch:
+            contexts, targets = [], []
+            for i, sample_id in enumerate(batch["_sample_id"].tolist()):
+                row = {
+                    key: value[i : i + 1]
+                    for key, value in batch.items()
+                    if key != "_sample_id"
+                }
+                with sample_rng(self._sample_seed(sample_id, "mask")):
+                    context, target = self._sample_masks(row)
+                contexts.append(context)
+                targets.append(target)
+            return torch.cat(contexts), torch.cat(targets)
         sampling_valid_mask = batch["peak_valid_mask"]
 
         strategies = self._mask_strategy_pool()
@@ -419,20 +465,27 @@ class SJEPABatchCollator(GemsBatchCollator):
             valid_mask,
             num_views=self.num_global_views,
             fraction=self.global_view_fraction,
+            sample_ids=batch.get("_sample_id"),
+            stream="global-view",
         )
         batch["sjepa_local_view_masks"] = self._sample_views(
             valid_mask,
             num_views=self.num_local_views,
             fraction=self.local_view_fraction,
+            sample_ids=batch.get("_sample_id"),
+            stream="local-view",
         )
+        batch.pop("_sample_id", None)
         return format_batch(batch, self.output_format)
 
-    @staticmethod
     def _sample_views(
+        self,
         valid_mask: torch.Tensor,
         *,
         num_views: int,
         fraction: float,
+        sample_ids: torch.Tensor | None = None,
+        stream: str = "view",
     ) -> torch.Tensor:
         masks = torch.zeros(
             valid_mask.shape[0],
@@ -444,8 +497,16 @@ class SJEPABatchCollator(GemsBatchCollator):
         for row_idx, row_valid in enumerate(valid_mask):
             retain_count = max(round(int(row_valid.sum()) * fraction), 1)
             for view_idx in range(num_views):
-                masks[row_idx, view_idx] = _sample_random_mask_1d_torch(
-                    row_valid,
-                    mask_count=retain_count,
-                )
+                if sample_ids is not None:
+                    with sample_rng(
+                        self._sample_seed(int(sample_ids[row_idx]), stream, view_idx)
+                    ):
+                        masks[row_idx, view_idx] = _sample_random_mask_1d_torch(
+                            row_valid, mask_count=retain_count
+                        )
+                else:
+                    masks[row_idx, view_idx] = _sample_random_mask_1d_torch(
+                        row_valid,
+                        mask_count=retain_count,
+                    )
         return masks

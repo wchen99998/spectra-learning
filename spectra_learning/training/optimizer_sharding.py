@@ -150,13 +150,15 @@ def zero1_adam_update(
         local_grads = jax.tree.map(lambda leaf: leaf * scale, local_grads)
 
     count = state.count + 1
+    # Match Optax's decay * stored_moment arithmetic, including bf16 rounding
+    # before adding the fp32 gradient contribution.
     mu = jax.tree.map(
-        lambda m, g: ((1 - b1) * g + b1 * m.astype(jnp.float32)),
+        lambda m, g: ((1 - b1) * g + b1 * m),
         state.mu,
         local_grads,
     )
     nu = jax.tree.map(
-        lambda v, g: ((1 - b2) * jnp.square(g) + b2 * v.astype(jnp.float32)),
+        lambda v, g: ((1 - b2) * jnp.square(g) + b2 * v),
         state.nu,
         local_grads,
     )
@@ -366,8 +368,9 @@ def zero1_flat_update(
         )
 
     count = state.count + 1
-    mu = (1 - b1) * local + b1 * state.mu.astype(jnp.float32)
-    nu = (1 - b2) * jnp.square(local) + b2 * state.nu.astype(jnp.float32)
+    # Keep the same stored-moment multiplication as replicated Optax Adam.
+    mu = (1 - b1) * local + b1 * state.mu
+    nu = (1 - b2) * jnp.square(local) + b2 * state.nu
     update = (mu / (1 - b1**count)) / (
         jnp.sqrt(nu / (1 - b2**count) + eps_root) + eps
     )

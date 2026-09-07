@@ -19,53 +19,107 @@ Only metadata required by the configured encoder is loaded. Collation accepts
 arrays directly; sample-list callers retain an adapter. No additional device
 queue or training framework is introduced.
 
-## Sampling and configuration
+## Randomness contract (version 2)
 
-The sampler, rolling pool, lanes, seeds, rank partitions, and resume offsets keep
-their algorithms. A comparison against the pre-change sampler produced identical
-sequences for 36 combinations of seeds, rank counts (2, 8, 16), and mixing modes.
-Tests cover duplicates, mask RNG state, group shapes, accumulation offsets, and
-spawned train/validation workers for all four tasks.
+Every training shard participates. Whole shards are assigned deterministically
+and balanced by eligible row counts. Training partitions have separate shuffle
+seeds; validation peers deliberately share a stream so their partitions remain
+disjoint. Ownership is independent of run length and accumulation. Changing
+host count can change ownership and therefore sample order.
 
-Workers are now counted **per process**, not divided by the world size. All JAX
-presets resolve to 4 workers and prefetch factor 2. More hosts therefore do not
-silently reduce input parallelism. PyTorch uses the same per-process convention.
-Changing worker count can change worker-local mask RNG streams; exact mask replay
-still requires the same worker configuration. The sampling algorithms and mask
-distributions are unchanged.
+The sampler randomly orders fixed-size blocks across all assigned shards, then
+uniformly shuffles **individual rows** within each block window. It exhausts the
+window before advancing. There are no lanes, forced adjacent row pairs, or
+pool-sized epoch truncations. Only the final partial batch and cross-host step
+alignment can discard examples. Hosts with more assigned rows still stop at the
+shortest host's optimizer-step count; whole-shard balancing is approximate.
 
-For a v2 resume, keep the pinned dataset revision and set workers to the old
-effective count (previous configured workers divided by process count, at least
-one when enabled). The existing strict checkpoint contract will flag changed
-runtime fields. Use the existing `jax_resume_allowed_config_keys` override for
-`dataloader_num_workers` and `device_prefetch_size` when accepting this runtime
-migration; keep dataset contract checks enabled. Removed v1 checkpoints require
-the earlier code revision.
+This is bounded shuffling, not a uniform permutation of the entire corpus.
+Within a window every row is equally eligible for each output position. Larger
+windows increase the scope of mixing. Grouped JEPA uses a uniform permutation of
+eligible groups across its assigned shards and independently selects spectra
+within each group; group membership remains intact.
 
-Keep the local microbatch divisible by `gems_hdf5_mix_blocks_per_batch`. For
-example, global batch 2048 / 16 processes / accumulation 4 is only 32 samples and
-cannot use 64-block mixing. Choose a compatible batch/accumulation configuration
-explicitly; the loader does not weaken mixing to make a configuration fit.
+The single mixing setting is `gems_hdf5_shuffle_window_blocks` (default 2048).
+`gems_hdf5_rows_per_block=0` uses the artifact's chunk row count, independent of
+microbatch size. `gems_hdf5_shuffle_seed` remains an optional order seed.
+The old active-shard, mixing-block, pool, and residency-lane settings are removed
+and rejected with a migration message. Microbatches no longer need to be divisible
+by a lane count.
+
+Each reader process caches complete logical blocks, bounded by the window's block
+count. At 256 rows per block, 2048 blocks contain 512 MiB of raw spectra, plus
+metadata, HDF5 caches, and Python overhead. Four workers can therefore hold four
+copies, about 2 GiB of spectra per dataset. Train and validation readers have
+separate lifetimes and caches. The sampler owns only index arrays; it does not
+copy spectra into a second central shuffle buffer. Cache contents are not pickled
+into new workers and are cleared on close.
+
+Workers are counted per training process. JAX presets use 4 workers with prefetch
+factor 2. Choose an explicit window budget appropriate for host RAM. Do not change
+the window opportunistically based on available memory: that would change the
+sample sequence on restart.
+
+Masks, S-JEPA views, and metadata dropout derive CPU seeds from the run seed,
+epoch, split, immutable shard identity, physical row, operation, and view index.
+These operations use separate streams and restore the caller's CPU RNG state.
+Mixed masking strategies are independently selected per example, rather than
+forcing a balanced strategy count within each microbatch.
+Changing worker count, batching, accumulation, prefetch scheduling, or validation
+cadence does not change training augmentations for a given example and epoch.
+Each spectrum is visited at most once in the sampler's epoch; the next epoch
+produces new views. The direct sample-list collator API still supports caller-owned
+RNG when no identity-based augmentation seed is configured.
+
+Validation uses a fixed augmentation seed and split-specific streams. DataLoader
+bootstrap seeds are separate from model RNG and include the data rank and epoch.
+Model initialization and shared model-side random quantities are not rank-folded.
+
+For unchanged corpus, host ownership, window/block settings, and seed, changing
+accumulation only regroups the sample stream. Resume regenerates the deterministic
+stream and skips the consumed row count; worker RNG checkpoints are unnecessary.
+Grouped selection likewise does not depend on output batch size.
+
+**Migration:** this intentionally changes sample order, epoch length, and masks.
+JAX checkpoints record `input_randomness_version=2`; PyTorch dataset checkpoint
+metadata records the version and input settings. Old-stream checkpoints should
+use the previous code revision, or initialize a new training run explicitly.
+Do not bypass the contract check and assume exact continuation. Re-run staging
+for an old partial assignment: training now requires all assigned corpus shards.
 
 ## Local reader measurement
 
-Measured on CPU against the pre-change reader using the same real v2 shard,
-17 metadata columns, sampled indices, and HDF5 handles. Each case used 4 warmup
-and 12 measured batches, alternating old/new order. Duplicate outputs were
-checked for exact equality. These are exploratory warm-cache measurements, not
-pod or end-to-end training results.
+A CPU comparison used the same real v2 shard and all 17 metadata columns, local
+batch 128, 100 warmup and 100 measured batches. The baseline used the previous
+64-unit rolling mixer (pool 2048, 8 lanes) and hybrid reader. The replacement
+used uniform row windows and the complete-block cache. The two samplers have
+different intended distributions; reads were checked against an uncached oracle.
 
-| Local batch | Mixing | Old median | New median |
-| --- | --- | ---: | ---: |
-| 128 | Single block | 18.94 ms | 1.71 ms |
-| 128 | 64 blocks, pool 2048, 8 lanes | 88.47 ms | 75.78 ms |
-| 1024 | Single block | 21.48 ms | 3.92 ms |
+| Reader | First 100 batches | Median, next 100 | p95, next 100 |
+| --- | ---: | ---: | ---: |
+| Previous rolling mixer | 8.13 s | 64.92 ms | 72.53 ms |
+| Row-window shuffle + cache | 9.29 s | 2.03 ms | 2.48 ms |
 
-The mixed case improves about 14% in latency. Its scattered compressed-chunk
-reads remain expensive. Do not infer the large single-block gain applies to the
-production mixing configuration. Storage cache state strongly affects tails.
-The columnar loader and metadata pruning may provide additional savings, but
-those are not included in this reader-only comparison.
+Cache fill is slightly slower in this measurement; steady reads are substantially
+faster. A new window or restarted worker incurs another fill phase. This is a
+single-process reader measurement, excludes collation and model execution, and
+is not a TPU throughput claim. Worker replication and storage cache state affect
+end-to-end results.
+
+A separate check of the first 100 batches on that shard measured actual source
+and entity diversity. Assigned entities use `(massive_id, global_group_id)`;
+unassigned rows count individually.
+
+| Mean metric | Previous rolling mixer | Row-window shuffle |
+| --- | ---: | ---: |
+| Unique entities per 128 spectra | 99.38 | 127.83 |
+| Unique projects per 128 spectra | 18.06 | 22.76 |
+| Entity overlap with preceding batch | 0.081 | 0.455 |
+
+The previous sampler explicitly excluded shared units within paired batches,
+which suppressed adjacent overlap. The replacement removes that artificial
+constraint; it greatly reduces within-batch entity duplication in this check.
+These are one-shard diagnostics, not an estimate of final model quality.
 
 ## Pod benchmark
 
@@ -134,10 +188,10 @@ be interpreted as device execution time. `jax_timing_barriers=True` synchronizes
 for attribution but changes overlap and throughput. Warmup ends with a state
 completion barrier before timing the next input batch.
 
-The CPU smoke check exercises real/cached AR training and spawned JAX placement.
-Two-process CPU runs also exercised global placement, slowest-host reporting,
-and real-input AR training, with data ranks deliberately swapped relative to
-JAX process indices. The relevant test checks passed 302 tests, with 4 skipped.
-Multi-host TPU throughput, device idle time, worker memory, and slowest-host
-stalls still need measurement on the target pod. No TPU speedup is claimed from
-the local results.
+The randomness tests check early positional coverage, complete window draining,
+disjoint partitions at 2/8/16 ranks, accumulation-independent ordering, spawned
+worker and resume invariance, metadata/view stream separation, cache bounds, and
+RNG isolation. A two-process CPU JAX smoke run exercises global placement and
+training with data ranks swapped relative to JAX process indices.
+Multi-host TPU throughput and worker memory still require target-pod measurement;
+no TPU speedup is claimed from the local results.

@@ -685,8 +685,10 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "sky jobs logs -n spectra-dryrun-assets" in output
 
 
+@pytest.mark.parametrize("job_control", (False, True))
 def test_task_run_kills_orphans_and_propagates_training_exit_code(
     tmp_path: Path,
+    job_control: bool,
 ) -> None:
     python = tmp_path / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -734,7 +736,7 @@ raise SystemExit(23)
     }
 
     result = subprocess.run(
-        ["bash", "-c", train_sky.TASK_RUN],
+        ["bash", "-c", ("set -m\n" if job_control else "") + train_sky.TASK_RUN],
         cwd=tmp_path,
         env=environment,
         capture_output=True,

@@ -1,13 +1,20 @@
 import math
-from collections import deque
 from collections.abc import Iterator, Sized
 from typing import cast
 
-import torch
+import numpy as np
 from torch.utils.data import Sampler
+
+from spectra_learning.data.gems.randomness import data_seed
 
 
 class ChunkedDistributedBatchSampler(Sampler[list[int]]):
+    """Shuffle all rows in bounded windows of randomly ordered storage blocks.
+
+    Block boundaries and permutations never depend on output batch size. Only
+    the final epoch tail can be dropped; every window is drained completely.
+    """
+
     def __init__(
         self,
         segments: list[tuple[int, int, int]],
@@ -19,345 +26,87 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         drop_last: bool,
         world_size: int,
         rank: int,
-        shuffle_segments: bool = False,
         partition_batches: bool = False,
-        active_segments: int = 1,
-        mix_blocks_per_batch: int = 1,
-        mix_pool_blocks: int = 0,
-        mix_lanes_per_residency: int = 0,
+        shuffle_window_blocks: int = 2048,
     ) -> None:
+        if batch_size < 1 or shuffle_window_blocks < 1:
+            raise ValueError("batch_size and shuffle_window_blocks must be positive")
+        if not 0 <= rank < world_size:
+            raise ValueError("rank must be between zero and world_size - 1")
         self.batch_size = batch_size
-        self.rows_per_block = rows_per_block
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
         self.world_size = world_size
         self.rank = rank
-        self.shuffle_segments = shuffle_segments
         self.partition_batches = partition_batches
-        self.active_segments = active_segments
-        self.mix_blocks_per_batch = mix_blocks_per_batch
-        self.mix_pool_blocks = mix_pool_blocks
-        self.mix_lanes_per_residency = mix_lanes_per_residency
-        assert self.active_segments >= 1
-        assert self.mix_blocks_per_batch >= 1
-        assert self.batch_size % self.mix_blocks_per_batch == 0
-        assert (self.mix_pool_blocks == 0) == (
-            self.mix_lanes_per_residency == 0
-        )
-        if self.mix_pool_blocks:
-            assert self.drop_last
-            assert self.mix_pool_blocks >= 2 * self.mix_blocks_per_batch
-            assert self.mix_lanes_per_residency <= self.mix_blocks_per_batch
-            assert (
-                self.mix_blocks_per_batch % self.mix_lanes_per_residency == 0
-            )
-        self.segment_blocks = [
-            self._build_blocks([segment]) for segment in segments
-        ]
-        self.blocks = [
-            block for blocks in self.segment_blocks for block in blocks
-        ]
+        self.shuffle_window_blocks = shuffle_window_blocks
         self.epoch = 0
-
-    def _build_blocks(
-        self,
-        segments: list[tuple[int, int, int]],
-    ) -> list[tuple[int, int]]:
-        blocks: list[tuple[int, int]] = []
+        blocks = []
         for start, length, chunk_rows in segments:
-            block_rows = self.rows_per_block
-            if block_rows is None:
-                block_rows = math.ceil(self.batch_size / chunk_rows) * chunk_rows
-            block_rows = max(chunk_rows, block_rows)
+            block_rows = max(chunk_rows, rows_per_block or chunk_rows)
             stop = start + length
-            for block_start in range(start, stop, block_rows):
-                blocks.append((block_start, min(block_start + block_rows, stop)))
-        return blocks
+            blocks.extend(
+                (row, min(row + block_rows, stop))
+                for row in range(start, stop, block_rows)
+            )
+        self.blocks = np.asarray(
+            blocks if partition_batches else blocks[rank::world_size],
+            dtype=np.int64,
+        ).reshape(-1, 2)
+        self.row_count = int(np.sum(self.blocks[:, 1] - self.blocks[:, 0]))
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def segment_order(self) -> list[int]:
-        if self.shuffle and self.shuffle_segments:
-            generator = torch.Generator()
-            generator.manual_seed(self.seed + self.epoch)
-            return torch.randperm(
-                len(self.segment_blocks),
-                generator=generator,
-            ).tolist()
-        return list(range(len(self.segment_blocks)))
-
     def __iter__(self) -> Iterator[list[int]]:
-        if self.shuffle and self.mix_pool_blocks:
-            yield from self._rolling_mixed_batches()
-            return
-
-        if self.shuffle and self.mix_blocks_per_batch > 1:
-            for batch_index, batch in enumerate(self._mixed_batches()):
+        rng = np.random.default_rng(
+            data_seed(
+                self.seed,
+                self.epoch,
+                "rows",
+                0 if self.partition_batches else self.rank,
+            )
+        )
+        order = (
+            rng.permutation(len(self.blocks))
+            if self.shuffle
+            else np.arange(len(self.blocks))
+        )
+        pending = np.empty(0, dtype=np.int64)
+        batch_index = 0
+        for offset in range(0, len(order), self.shuffle_window_blocks):
+            window = order[offset : offset + self.shuffle_window_blocks]
+            rows = np.concatenate(
+                [np.arange(*self.blocks[i], dtype=np.int64) for i in window]
+            )
+            if self.shuffle:
+                rng.shuffle(rows)
+            if len(pending):
+                rows = np.concatenate((pending, rows))
+            full_stop = len(rows) // self.batch_size * self.batch_size
+            for start in range(0, full_stop, self.batch_size):
                 if (
                     not self.partition_batches
                     or batch_index % self.world_size == self.rank
                 ):
-                    yield batch
-            return
-
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        if self.shuffle and self.shuffle_segments:
-            segment_order = self.segment_order()
-            torch.randperm(len(self.segment_blocks), generator=generator)
-            blocks = []
-            for segment_index in segment_order:
-                segment_blocks = list(self.segment_blocks[segment_index])
-                block_order = torch.randperm(
-                    len(segment_blocks),
-                    generator=generator,
-                ).tolist()
-                blocks.extend(
-                    segment_blocks[index] for index in block_order
-                )
-        else:
-            blocks = list(
-                self.blocks
-                if self.partition_batches
-                else self.blocks[self.rank :: self.world_size]
-            )
-        if self.shuffle and not self.shuffle_segments:
-            order = torch.randperm(len(blocks), generator=generator).tolist()
-            blocks = [blocks[index] for index in order]
-
-        partial_batches: list[list[int]] = []
-        batch_index = 0
-        for block_start, block_stop in blocks:
-            rows = list(range(block_start, block_stop))
-            if self.shuffle:
-                order = torch.randperm(len(rows), generator=generator).tolist()
-                rows = [rows[index] for index in order]
-            for offset in range(0, len(rows), self.batch_size):
-                batch = rows[offset : offset + self.batch_size]
-                if len(batch) == self.batch_size:
-                    if (
-                        not self.partition_batches
-                        or batch_index % self.world_size == self.rank
-                    ):
-                        yield batch
-                    batch_index += 1
-                elif not self.drop_last:
-                    partial_batches.append(batch)
-        for batch in partial_batches:
-            if (
-                not self.partition_batches
-                or batch_index % self.world_size == self.rank
-            ):
-                yield batch
-            batch_index += 1
-
-    def _rolling_mixed_batches(self) -> Iterator[list[int]]:
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        segment_order = self.segment_order()
-        units: list[tuple[int, int]] = []
-        for segment_index in segment_order:
-            blocks = self.segment_blocks[segment_index]
-            for block_start, block_stop in blocks:
-                full_stop = block_start + (
-                    (block_stop - block_start) // self.batch_size
-                ) * self.batch_size
-                units.extend(
-                    (start, start + self.batch_size)
-                    for start in range(
-                        block_start,
-                        full_stop,
-                        self.batch_size,
-                    )
-                )
-
-        unit_order = torch.randperm(
-            len(units),
-            generator=generator,
-        ).tolist()
-        ordered_units = [units[index] for index in unit_order]
-        lane_count = self.mix_blocks_per_batch
-        lane_rows = self.batch_size // lane_count
-        residency_lanes = self.mix_lanes_per_residency
-        activation_order = (
-            (unit_index, lane_start)
-            for lane_start in range(0, lane_count, residency_lanes)
-            for unit_index in range(len(ordered_units))
-        )
-
-        def lane_for(
-            block_start: int,
-            lane_position: int,
-        ) -> int:
-            value = block_start ^ self.seed ^ (self.epoch << 32)
-            offset = value % lane_count
-            stride = value // lane_count % lane_count
-            while math.gcd(stride, lane_count) != 1:
-                stride += 1
-            return (offset + stride * lane_position) % lane_count
-
-        active: list[list[int]] = []
-        for _ in range(self.mix_pool_blocks):
-            unit_index, lane_start = next(activation_order)
-            active.append([unit_index, lane_start, 0])
-
-        target_batches = self._rolling_batch_count()
-        batches = 0
-        while batches + 2 <= target_batches:
-            selected = torch.randperm(
-                len(active),
-                generator=generator,
-            )[: 2 * lane_count].tolist()
-            pair: list[list[int]] = []
-            for side in range(2):
-                batch = []
-                for slot in selected[
-                    side * lane_count : (side + 1) * lane_count
-                ]:
-                    unit_index, lane_start, used = active[slot]
-                    block_start, _ = ordered_units[unit_index]
-                    lane = lane_for(block_start, lane_start + used)
-                    row_start = block_start + lane * lane_rows
-                    batch.extend(range(row_start, row_start + lane_rows))
-                order = torch.randperm(
-                    len(batch),
-                    generator=generator,
-                ).tolist()
-                pair.append([batch[index] for index in order])
-
-            for slot in selected:
-                active[slot][2] += 1
-            yield pair[0]
-            yield pair[1]
-            batches += 2
-
-            for slot in selected:
-                if active[slot][2] == residency_lanes:
-                    unit_index, lane_start = next(activation_order)
-                    active[slot] = [unit_index, lane_start, 0]
-
-    def _rolling_batch_count(self) -> int:
-        batches = self.full_batch_count - self.mix_pool_blocks
-        return max(0, batches - batches % 2)
-
-    def _mixed_batches(self) -> Iterator[list[int]]:
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        segment_order = self.segment_order()
-        torch.randperm(len(self.segment_blocks), generator=generator)
-        partial_batches: list[list[int]] = []
-        for window_start in range(0, len(segment_order), self.active_segments):
-            window = segment_order[
-                window_start : window_start + self.active_segments
-            ]
-            queues = []
-            for segment_index in window:
-                blocks = self.segment_blocks[segment_index]
-                block_order = torch.randperm(
-                    len(blocks),
-                    generator=generator,
-                ).tolist()
-                units: list[tuple[int, int]] = []
-                for block_index in block_order:
-                    block_start, block_stop = blocks[block_index]
-                    full_stop = block_start + (
-                        (block_stop - block_start) // self.batch_size
-                    ) * self.batch_size
-                    units.extend(
-                        (start, start + self.batch_size)
-                        for start in range(block_start, full_stop, self.batch_size)
-                    )
-                    if not self.drop_last and full_stop < block_stop:
-                        partial_batches.append(list(range(full_stop, block_stop)))
-                queues.append(deque(units))
-
-            while any(queues):
-                group: list[tuple[int, int]] = []
-                queue_order = torch.randperm(
-                    len(queues),
-                    generator=generator,
-                ).tolist()
-                while len(group) < self.mix_blocks_per_batch and any(queues):
-                    for queue_index in queue_order:
-                        if queues[queue_index]:
-                            group.append(queues[queue_index].popleft())
-                            if len(group) == self.mix_blocks_per_batch:
-                                break
-                if len(group) == self.mix_blocks_per_batch:
-                    yield from self._striped_batches(group, generator)
-                else:
-                    for start, stop in group:
-                        rows = list(range(start, stop))
-                        order = torch.randperm(
-                            len(rows),
-                            generator=generator,
-                        ).tolist()
-                        yield [rows[index] for index in order]
-
-        for batch in partial_batches:
-            order = torch.randperm(len(batch), generator=generator).tolist()
-            yield [batch[index] for index in order]
-
-    def _striped_batches(
-        self,
-        group: list[tuple[int, int]],
-        generator: torch.Generator,
-    ) -> Iterator[list[int]]:
-        lane_rows = self.batch_size // self.mix_blocks_per_batch
-        lane_orders = [
-            torch.randperm(
-                self.mix_blocks_per_batch,
-                generator=generator,
-            ).tolist()
-            for _ in group
-        ]
-        for output_index in range(self.mix_blocks_per_batch):
-            batch = []
-            for (start, _stop), lanes in zip(group, lane_orders, strict=True):
-                lane_start = start + lanes[output_index] * lane_rows
-                batch.extend(range(lane_start, lane_start + lane_rows))
-            order = torch.randperm(len(batch), generator=generator).tolist()
-            yield [batch[index] for index in order]
-
-    def _partitioned_batch_count(self, total: int) -> int:
-        return max(
-            0,
-            (total + self.world_size - 1 - self.rank) // self.world_size,
-        )
-
-    @property
-    def full_batch_count(self) -> int:
-        total = sum(
-            (block_stop - block_start) // self.batch_size
-            for block_start, block_stop in (
-                self.blocks
-                if self.partition_batches
-                else self.blocks[self.rank :: self.world_size]
-            )
-        )
-        if self.partition_batches:
-            return self._partitioned_batch_count(total)
-        return total
+                    yield rows[start : start + self.batch_size].tolist()
+                batch_index += 1
+            pending = rows[full_stop:]
+        if len(pending) and not self.drop_last:
+            if not self.partition_batches or batch_index % self.world_size == self.rank:
+                yield pending.tolist()
 
     def __len__(self) -> int:
-        if self.shuffle and self.mix_pool_blocks:
-            return self._rolling_batch_count()
-        blocks = (
-            self.blocks
-            if self.partition_batches
-            else self.blocks[self.rank :: self.world_size]
+        batches = (
+            self.row_count // self.batch_size
+            if self.drop_last
+            else math.ceil(self.row_count / self.batch_size)
         )
-        batches = 0
-        for block_start, block_stop in blocks:
-            block_len = block_stop - block_start
-            if self.drop_last:
-                batches += block_len // self.batch_size
-            else:
-                batches += math.ceil(block_len / self.batch_size)
         if self.partition_batches:
-            return self._partitioned_batch_count(batches)
+            return max(
+                0, (batches + self.world_size - 1 - self.rank) // self.world_size
+            )
         return batches
 
 

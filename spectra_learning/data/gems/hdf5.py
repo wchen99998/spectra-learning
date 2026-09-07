@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from spectra_learning.data.gems.artifacts import (
     GemsHdf5Shard,
 )
 from spectra_learning.data.spectra import NUM_PEAKS_INPUT
+from spectra_learning.data.gems.randomness import data_seed
 
 GEMS_SPECTRUM_METADATA_DATASETS = {
     "collision_energy": "collision_energy",
@@ -60,7 +62,15 @@ class MassiveV2Hdf5ShardDataset:
         precursor_dataset: str,
         split: Literal["train", "validation"],
         metadata_keys: tuple[str, ...] | None = None,
+        cache_blocks: int = 2048,
+        rows_per_block: int | None = None,
     ) -> None:
+        if cache_blocks < 1:
+            raise ValueError("cache_blocks must be positive")
+        self.cache_blocks = cache_blocks
+        self.rows_per_block = rows_per_block
+        self._raw_blocks = OrderedDict()
+        self._shard_seeds = [data_seed(shard.path, shard.sha256) for shard in shards]
         self.manifest_path = Path(manifest_path)
         self.spectrum_dataset = spectrum_dataset
         self.precursor_dataset = precursor_dataset
@@ -132,6 +142,7 @@ class MassiveV2Hdf5ShardDataset:
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
+        state["_raw_blocks"] = OrderedDict()
         state["files"] = {}
         state["spectra"] = {}
         state["precursors"] = {}
@@ -200,6 +211,7 @@ class MassiveV2Hdf5ShardDataset:
             resources.pop_all()
 
     def close(self) -> None:
+        self._raw_blocks.clear()
         for file in self.files.values():
             file.close()
         self.files = {}
@@ -214,11 +226,22 @@ class MassiveV2Hdf5ShardDataset:
         if isinstance(indices, int):
             return {key: value[0] for key, value in self[[indices]].items()}
         spectra, precursor, metadata = self.read_raw_batch(indices)
+        shard_ids, physical_rows = self._physical_rows(
+            np.asarray(indices, dtype=np.int64)
+        )
+        sample_ids = np.asarray(
+            [
+                data_seed(self._shard_seeds[int(shard)], int(row))
+                for shard, row in zip(shard_ids, physical_rows, strict=True)
+            ],
+            dtype=np.uint64,
+        )
         return {
             "spectra": spectra,
             "precursor_mz_raw": precursor,
             **metadata,
             "index": np.asarray(indices, dtype=np.int64),
+            "sample_id": sample_ids,
         }
 
     def _physical_rows(
@@ -261,6 +284,45 @@ class MassiveV2Hdf5ShardDataset:
         return shard_ids, physical_rows
 
     def read_raw_batch(
+        self, indices: list[int]
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+        indices_np = np.asarray(indices, dtype=np.int64)
+        spectra = np.empty((len(indices), 2, NUM_PEAKS_INPUT), dtype=np.float32)
+        precursor = np.empty(len(indices), dtype=np.float32)
+        metadata = {
+            key: np.empty(len(indices), dtype=np.float32) for key in self.metadata
+        }
+        shard_ids = np.searchsorted(self.stops, indices_np, side="right")
+        for shard_id in np.unique(shard_ids):
+            state = self.states[int(shard_id)]
+            positions = np.flatnonzero(shard_ids == shard_id)
+            local = indices_np[positions] - state.logical_start
+            block_rows = max(
+                state.spec.chunk_rows, self.rows_per_block or state.spec.chunk_rows
+            )
+            block_ids = local // block_rows
+            for block_id in np.unique(block_ids):
+                key = (int(shard_id), int(block_id))
+                if key not in self._raw_blocks:
+                    start = state.logical_start + int(block_id) * block_rows
+                    stop = min(start + block_rows, state.logical_stop)
+                    self._raw_blocks[key] = self._read_raw_rows(
+                        list(range(start, stop))
+                    )
+                    if len(self._raw_blocks) > self.cache_blocks:
+                        self._raw_blocks.popitem(last=False)
+                self._raw_blocks.move_to_end(key)
+                block_spectra, block_precursor, block_metadata = self._raw_blocks[key]
+                selected = np.flatnonzero(block_ids == block_id)
+                output = positions[selected]
+                offsets = local[selected] % block_rows
+                spectra[output] = block_spectra[offsets]
+                precursor[output] = block_precursor[offsets]
+                for name in metadata:
+                    metadata[name][output] = block_metadata[name][offsets]
+        return spectra, precursor, metadata
+
+    def _read_raw_rows(
         self,
         indices: list[int],
     ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:

@@ -24,6 +24,7 @@ from tqdm import tqdm
 from spectra_learning.config import config_to_dict
 from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
 from spectra_learning.data.gems.datamodule import GemsDataModule
+from spectra_learning.data.gems.randomness import INPUT_RANDOMNESS_VERSION
 from spectra_learning.data.gems.mask_schedule import (
     jepa_mask_stage_index,
     jepa_mask_stages,
@@ -1251,6 +1252,7 @@ def prepare_jax_training_config(config: config_dict.ConfigDict) -> None:
         )
     if "device_prefetch_size" in config:
         del config["device_prefetch_size"]
+    config.input_randomness_version = INPUT_RANDOMNESS_VERSION
     config.dataloader_pin_memory = False
     config.dataloader_persistent_workers = False
     config.dataloader_output_format = "numpy"
@@ -1671,38 +1673,31 @@ class _JaxTrainingLoop:
             teacher_target_steps = []
         for capacity in self.mask_capacities:
             self.model.set_fastmixer_capacities(*capacity)
-            stage_graphdef, _, _ = nnx.split(
-                self.model,
-                trainable_param_filter,
-                ...,
-            )
+            stage_graphdef = nnx.graphdef(self.model)
             train_step, eval_step, teacher_target_step = make_steps(stage_graphdef)
             train_steps.append(train_step)
             eval_steps.append(eval_step)
             teacher_target_steps.append(teacher_target_step)
         if self.use_mask_schedule:
             self.model.set_fastmixer_capacities(*self.mask_capacities[0])
-        state = _JaxTrainState(params, static_state, opt_state)
         if self.use_sharded_step:
             params, static_state = replicate_trainable_state_on_mesh(
                 self.model,
-                state.trainable_params,
-                state.static_state,
+                params,
+                static_state,
                 self.data_mesh,
             )
             opt_state = (
-                state.opt_state
+                opt_state
                 if zero1_shards
                 else _replicate_tree_on_data_mesh(
-                    state.opt_state,
+                    opt_state,
                     self.data_mesh,
                 )
             )
-            state = _JaxTrainState(
-                params,
-                static_state,
-                opt_state,
-            )
+        # Construct the owner after placement so it cannot retain the original
+        # single-device model buffers while optimizer moments are replicated.
+        state = _JaxTrainState(params, static_state, opt_state)
         if self.group_jepa_lookahead:
             local_target = np.zeros(
                 (
@@ -1737,6 +1732,9 @@ class _JaxTrainingLoop:
                         state.static_state["teacher_encoder"],
                     )
                 )
+                # The model also owns these arrays; release its random teacher
+                # buffers once the checkpoint has replaced the frozen state.
+                nnx.update(self.model, state.static_state)
                 if jax.process_index() == 0:
                     logging.info(
                         "Restored frozen JAX teacher encoder from %s",

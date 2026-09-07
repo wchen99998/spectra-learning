@@ -68,13 +68,14 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     }
     assert data_keys - set(config) == {
         "encoder_metadata_schema",
-        "gems_hdf5_active_shards",
-        "gems_hdf5_mix_blocks_per_batch",
-        "gems_hdf5_mix_pool_blocks",
-        "gems_hdf5_mix_lanes_per_residency",
         "gems_hdf5_shuffle_seed",
+        "gems_hdf5_shuffle_window_blocks",
         "jepa_intensity_aware_mask_config",
         "min_precursor_mz",
+        "sjepa_global_view_fraction",
+        "sjepa_local_view_fraction",
+        "sjepa_num_global_views",
+        "sjepa_num_local_views",
         "spectrum_metadata_dropout_probability",
     }
     assert "nist_murcko_probe_repo_id" not in config

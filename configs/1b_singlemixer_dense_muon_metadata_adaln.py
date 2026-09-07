@@ -41,10 +41,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_hdf5_retention_time_dataset = "RT"
     cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
-    cfg.gems_hdf5_active_shards = 8
-    cfg.gems_hdf5_mix_blocks_per_batch = 64
-    cfg.gems_hdf5_mix_pool_blocks = 2_048
-    cfg.gems_hdf5_mix_lanes_per_residency = 8
     cfg.gems_hdf5_shuffle_seed = 67
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 4_096

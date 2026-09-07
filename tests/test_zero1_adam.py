@@ -33,8 +33,11 @@ from jax.sharding import PartitionSpec as P
 from spectra_learning.training.optimizer_sharding import (
     zero1_adam_init,
     zero1_adam_update,
+    zero1_flat_init,
+    zero1_flat_update,
     zero1_state_specs,
 )
+from spectra_learning.training.pretrain_jax import _jax_scale_by_adam_bf16_states
 
 AXIS = "data"
 STEPS = 3
@@ -75,21 +78,34 @@ def per_rank_grads(shards):
     return grads
 
 
-def reference(step_grads):
+def reference(step_grads, bf16=False):
     tx = optax.chain(
         optax.clip_by_global_norm(CLIP),
-        optax.adamw(schedule, b1=B1, b2=B2, weight_decay=WD, mask=mask_fn),
+        optax.chain(
+            _jax_scale_by_adam_bf16_states(b1=B1, b2=B2),
+            optax.add_decayed_weights(WD, mask=mask_fn),
+            optax.scale_by_learning_rate(schedule),
+        ) if bf16 else optax.adamw(
+            schedule, b1=B1, b2=B2, weight_decay=WD, mask=mask_fn
+        ),
     )
+    # Production runs the complete optimizer under jit. Eager bf16 primitives
+    # have different fusion/rounding boundaries and are not that reference.
+    @jax.jit
+    def step(tree, state, summed):
+        updates, state = tx.update(summed, state, tree)
+        return optax.apply_updates(tree, updates), state
+
     state = tx.init(params)
     tree = params
     for stacked in step_grads:
         summed = jax.tree.map(lambda g: jnp.sum(g, axis=0), stacked)
-        updates, state = tx.update(summed, state, tree)
-        tree = optax.apply_updates(tree, updates)
+        tree, state = step(tree, state, summed)
     return tree
 
 
-def sharded(step_grads, shards, scatter_dtype, gather_dtype):
+def sharded(step_grads, shards, scatter_dtype, gather_dtype,
+            moment_dtype=jnp.float32, flat=False):
     mesh = jax.make_mesh((shards,), (AXIS,), devices=jax.devices()[:shards])
     specs = zero1_state_specs(AXIS)
 
@@ -103,7 +119,8 @@ def sharded(step_grads, shards, scatter_dtype, gather_dtype):
     )
     def run(tree, stacked, state):
         grad = jax.tree.map(lambda g: g[0], stacked)
-        updates, state = zero1_adam_update(
+        update = zero1_flat_update if flat else zero1_adam_update
+        updates, state = update(
             grad,
             state,
             tree,
@@ -128,7 +145,11 @@ def sharded(step_grads, shards, scatter_dtype, gather_dtype):
             tree_,
         )
 
-    state = zero1_adam_init(params, shards=shards)
+    state = (
+        zero1_flat_init(params, shards=shards, mesh=mesh, shard_axis=AXIS,
+                        moment_dtype=moment_dtype)
+        if flat else zero1_adam_init(params, shards=shards, moment_dtype=moment_dtype)
+    )
     state = state._replace(
         count=place(state.count, P()),
         mu=place(state.mu, P(AXIS)),
@@ -167,6 +188,21 @@ jax.tree.map(
     want,
     got,
 )
+# bf16 moment storage must follow the replicated Optax arithmetic, including
+# rounding the decay-times-stored-moment product before adding fp32 gradients.
+want = reference(step_grads, bf16=True)
+for flat in (False, True):
+    got, state = sharded(
+        step_grads, 4, jnp.float32, jnp.float32,
+        moment_dtype=jnp.bfloat16, flat=flat,
+    )
+    assert all(x.dtype == jnp.bfloat16 for x in jax.tree.leaves(state.mu))
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(
+            np.asarray(a), np.asarray(b), rtol=3e-6, atol=3e-6
+        ),
+        want, got,
+    )
 print("EQUIVALENT")
 """
 
