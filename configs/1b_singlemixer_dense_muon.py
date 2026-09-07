@@ -169,12 +169,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_every_n_layers = 1
     cfg.activation_checkpoint_modules = ("encoder", "predictor")
     cfg.activation_checkpoint_preserve_rng_state = True
-    cfg.device_prefetch_size = 8
     cfg.throughput_warmup_steps = 25
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 50_000
-    cfg.dataloader_num_workers = 32
+    cfg.dataloader_num_workers = 4
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = False

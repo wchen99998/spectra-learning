@@ -35,13 +35,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-finalrun"
     cfg.wandb_kwargs = {
-        "name": "ar-spectra-jax-rope-multilevel-100m-bs2048-bf16-250k",
+        "name": "ar-spectra-jax-rope-multilevel-massive-v2-bs2048-bf16-250k",
     }
 
-    cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
-    cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
-    cfg.gems_hdf5_revision = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
-    cfg.gems_hdf5_manifest = "fdataloader_shards.json"
+    cfg.artifact_dir = "data/massive_v2_ms2_t095_l080_sharded_10gb"
+    cfg.gems_hdf5_repo_id = "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
+    cfg.gems_hdf5_revision = "b098155fccb7335b752f2690bf16d2479d69bf5b"
+    cfg.gems_hdf5_manifest = "manifest.json"
     cfg.gems_hdf5_spectrum_dataset = "spectrum"
     cfg.gems_hdf5_precursor_dataset = "precursor_mz"
     cfg.gems_hdf5_retention_time_dataset = "RT"
@@ -50,7 +50,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.batch_size = 2048
     cfg.gradient_accumulation_steps = 1
     cfg.drop_remainder = True
-    cfg.dataloader_num_workers = 8
+    cfg.dataloader_num_workers = 4
     cfg.dataloader_pin_memory = False
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = False

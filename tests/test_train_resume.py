@@ -12,7 +12,6 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.config import config_to_dict
-from spectra_learning.data.gems.artifacts import LEGACY_GEMS_HDF5_FORMAT
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
@@ -1063,7 +1062,7 @@ def test_jax_learning_rate_schedule_supports_warm_restart():
         ) == pytest.approx(learning_rate)
 
 
-def test_jax_datamodule_uses_materialized_gems_rank(monkeypatch):
+def test_jax_datamodule_uses_supplied_data_rank(monkeypatch):
     from spectra_learning.training import pretrain_jax
 
     kwargs = {}
@@ -1085,7 +1084,7 @@ def test_jax_datamodule_uses_materialized_gems_rank(monkeypatch):
     assert kwargs == {
         "seed": 66,
         "distributed_world_size": 16,
-        "distributed_rank": 7,
+        "distributed_rank": 1,
         "distributed_local_rank": 0,
     }
 
@@ -1098,6 +1097,7 @@ def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
 ):
     from spectra_learning.training import pretrain_jax
 
+    monkeypatch.setenv("SPECTRA_GEMS_RANK", "1")
     logger = _FakeLogger()
     checkpoint_manager = _FakeCheckpointManager()
     datamodule_kwargs = {}
@@ -1107,7 +1107,7 @@ def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
         global_batch_size = 32
         batch_size = 16
         gradient_accumulation_steps = 1
-        artifact = SimpleNamespace(format=LEGACY_GEMS_HDF5_FORMAT)
+        artifact = SimpleNamespace(format="unit-test")
         info = {"source": "unit-test"}
 
         def __init__(self, config, **kwargs) -> None:
@@ -1183,7 +1183,7 @@ def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
     results = pretrain_jax.train_and_evaluate_jax(cfg, tmp_path)
 
     assert datamodule_kwargs["distributed_world_size"] == 2
-    assert datamodule_kwargs["distributed_rank"] == 0
+    assert datamodule_kwargs["distributed_rank"] == 1
     assert datamodule_kwargs["distributed_local_rank"] == 0
     assert cfg.dataloader_pin_memory is False
     assert cfg.dataloader_persistent_workers is False
@@ -1235,7 +1235,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
         global_batch_size = 32
         batch_size = 16
         gradient_accumulation_steps = 1
-        artifact = SimpleNamespace(format=LEGACY_GEMS_HDF5_FORMAT)
+        artifact = SimpleNamespace(format="unit-test")
         info = {"source": "unit-test"}
 
         def __init__(self, config, **kwargs) -> None:

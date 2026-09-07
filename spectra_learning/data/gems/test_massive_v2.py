@@ -1,7 +1,6 @@
 import hashlib
 import json
 import shutil
-import threading
 from pathlib import Path
 from unittest import mock
 
@@ -126,9 +125,7 @@ def _write_artifact(root: Path) -> dict:
         "grouping": {
             "assigned_rule": "group_id >= 0",
             "corpus_entity_key": ["massive_id", "global_group_id"],
-            "raw_global_group_id_formula": (
-                "file_id * 2**32 + group_id"
-            ),
+            "raw_global_group_id_formula": ("file_id * 2**32 + group_id"),
             "assigned_rows": 20,
             "assigned_group_occurrences_within_source_files": 20,
         },
@@ -178,9 +175,7 @@ def _planning_manifest(
                 "shards": shards("train", train_shard_count),
             },
             "validation": {
-                "eligible_rows": (
-                    validation_shard_count * eligible_rows_per_shard
-                ),
+                "eligible_rows": (validation_shard_count * eligible_rows_per_shard),
                 "shards": shards("validation", validation_shard_count),
             },
         },
@@ -214,97 +209,40 @@ def _config(tmp_path: Path) -> config_dict.ConfigDict:
     return config
 
 
-def test_multihost_plan_downloads_only_each_ranks_budgeted_shards(
+def test_multihost_staged_loaders_preserve_assignment_and_validation(
     tmp_path: Path,
 ) -> None:
-    remote = tmp_path / "remote"
-    _write_artifact(remote)
     config = _config(tmp_path)
     config.training_max_steps = 2
-    calls: list[list[str]] = []
-
-    def snapshot_download(*, local_dir: str | Path, allow_patterns, **_kwargs):
-        local = Path(local_dir)
-        local.mkdir(parents=True, exist_ok=True)
-        calls.append(list(allow_patterns))
-        for pattern in allow_patterns:
-            source = remote / pattern
-            if source.is_file():
-                target = local / pattern
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-        return str(local)
-
-    with mock.patch.object(
-        gems_artifacts,
-        "snapshot_download",
-        side_effect=snapshot_download,
-    ):
-        rank0 = gems.GemsDataModule(
-            config,
-            seed=7,
-            distributed_world_size=2,
-            distributed_rank=0,
-            distributed_local_rank=0,
-        )
-        rank1 = gems.GemsDataModule(
-            config,
-            seed=7,
-            distributed_world_size=2,
-            distributed_rank=1,
-            distributed_local_rank=0,
-        )
-        rank0_train = set(rank0.artifact.train_shards(0))
-        rank1_train = set(rank1.artifact.train_shards(1))
-        assert rank0_train.isdisjoint(rank1_train)
-        assert len(rank0_train) == len(rank1_train) == 2
-        assert len(rank0.artifact.validation_shards(0)) == 1
-        assert len(rank1.artifact.validation_shards(1)) == 1
-        rank0._datasets["train"].wait_for_prefetch()
-        rank1._datasets["train"].wait_for_prefetch()
-        assert calls[0] == ["manifest.json"]
-        assert {call[0] for call in calls[1:]} == {
-            rank0._datasets["train"].states[
-                rank0._datasets["train"].shard_order[0]
-            ].spec.path,
-            rank1._datasets["train"].states[
-                rank1._datasets["train"].shard_order[0]
-            ].spec.path,
-        }
-        assert not any(
-            Path(path).exists()
-            for path in (
-                *rank0.gems_validation_shards,
-                *rank1.gems_validation_shards,
+    _write_artifact(
+        Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    )
+    with mock.patch.object(materializer, "snapshot_download") as download:
+        modules = [
+            gems.GemsDataModule(
+                config, seed=7, distributed_world_size=2, distributed_rank=rank
             )
-        )
-
-        batch = next(iter(rank0.train_loader_for_epoch(0)))
-        assert batch["peak_mz"].shape == (2, 4)
-        rank0._datasets["train"].wait_for_prefetch()
-        assert all(
-            Path(path).exists() for path in rank0.gems_train_shards
-        )
-        rank0_validation = rank0.val_loader_for_eval(augment=False)
-        rank1_validation = rank1.val_loader_for_eval(augment=False)
-        assert rank0_validation.batch_sampler.seed == 42
-        assert rank1_validation.batch_sampler.seed == 42
-        assert rank0_validation.batch_sampler.partition_batches
-        assert rank1_validation.batch_sampler.partition_batches
-        next(iter(rank0_validation))
-        assert calls[-1] == [
-            rank0.artifact.validation_shards(0)[0].path
+            for rank in range(2)
         ]
-        next(iter(rank1.train_loader_for_epoch(0)))
-        rank1._datasets["train"].wait_for_prefetch()
-        assert all(
-            Path(path).exists() for path in rank1.gems_train_shards
+        rank0, rank1 = modules
+        assert set(rank0.artifact.train_shards(0)).isdisjoint(
+            rank1.artifact.train_shards(1)
         )
-        assert len(calls) == 6
-        assert rank0.info["gems_shard_plan_sha256"] == (
-            rank1.info["gems_shard_plan_sha256"]
+        assert (
+            rank0.info["gems_shard_plan_sha256"] == rank1.info["gems_shard_plan_sha256"]
         )
-        assert "planned_download_bytes" in rank0.info
+        for module in modules:
+            assert next(iter(module.train_loader_for_epoch(0)))["peak_mz"].shape == (
+                2,
+                4,
+            )
+            validation = module.val_loader_for_eval(augment=False)
+            assert validation.sampler.seed == 42
+            assert validation.sampler.partition_batches
+            next(iter(validation))
+            for dataset in module._datasets.values():
+                dataset.close()
+        download.assert_not_called()
 
 
 def test_materialize_rank_shards_downloads_complete_plan(
@@ -329,7 +267,7 @@ def test_materialize_rank_shards_downloads_complete_plan(
         return str(local)
 
     with mock.patch.object(
-        gems_artifacts,
+        materializer,
         "snapshot_download",
         side_effect=snapshot_download,
     ):
@@ -378,8 +316,7 @@ def test_validation_plan_supplies_every_process_for_any_v6e_topology(
         validation_assignments=validation,
     )
     partitions = [
-        artifact.validation_sampler_partition(rank)
-        for rank in range(world_size)
+        artifact.validation_sampler_partition(rank) for rank in range(world_size)
     ]
     for assignment in set(validation):
         peers = [
@@ -388,18 +325,20 @@ def test_validation_plan_supplies_every_process_for_any_v6e_topology(
             if rank_assignment == assignment
         ]
         assert [partitions[rank] for rank in peers] == [
-            (len(peers), peer_index)
-            for peer_index in range(len(peers))
+            (len(peers), peer_index) for peer_index in range(len(peers))
         ]
         shard = assignment[0]
         local_batch_size = 4_096 // (world_size * 2)
-        assert gems_artifacts._batch_count(
-            shard.eligible_rows,
-            batch_size=local_batch_size,
-            chunk_rows=shard.chunk_rows,
-            rows_per_block=0,
-            drop_last=True,
-        ) >= len(peers) * 500
+        assert (
+            gems_artifacts._batch_count(
+                shard.eligible_rows,
+                batch_size=local_batch_size,
+                chunk_rows=shard.chunk_rows,
+                rows_per_block=0,
+                drop_last=True,
+            )
+            >= len(peers) * 500
+        )
 
 
 def test_validation_plan_rejects_too_few_full_batches() -> None:
@@ -425,44 +364,180 @@ def test_validation_plan_rejects_too_few_full_batches() -> None:
         )
 
 
-def test_initial_shard_prefetch_does_not_block_datamodule_init(
-    tmp_path: Path,
-) -> None:
-    remote = tmp_path / "remote"
-    _write_artifact(remote)
+def test_training_requires_staged_manifest_and_shards(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.batch_size = 2
-    prefetch_started = threading.Event()
-    release_prefetch = threading.Event()
+    with mock.patch.object(materializer, "snapshot_download") as download:
+        with pytest.raises(FileNotFoundError, match="manifest is not staged"):
+            gems.GemsDataModule(config, seed=7)
+        root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+        manifest = _write_artifact(root)
+        for shard in manifest["splits"]["train"]["shards"]:
+            (root / shard["path"]).unlink()
+        with pytest.raises(FileNotFoundError, match="shards are not staged"):
+            gems.GemsDataModule(config, seed=7)
+        download.assert_not_called()
 
-    def snapshot_download(*, local_dir: str | Path, allow_patterns, **_kwargs):
-        local = Path(local_dir)
-        local.mkdir(parents=True, exist_ok=True)
-        for pattern in allow_patterns:
-            if pattern.endswith(".hdf5"):
-                prefetch_started.set()
-                release_prefetch.wait()
-            source = remote / pattern
-            if source.is_file():
-                target = local / pattern
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-        return str(local)
 
-    with mock.patch.object(
-        gems_artifacts,
-        "snapshot_download",
-        side_effect=snapshot_download,
-    ):
-        datamodule = gems.GemsDataModule(config, seed=7)
-        assert prefetch_started.wait(timeout=1.0)
-        dataset = datamodule._datasets["train"]
-        assert dataset.prefetch_thread is not None
-        assert dataset.prefetch_thread.is_alive()
-        assert not list(Path(config.artifact_dir).rglob("*.hdf5"))
-        release_prefetch.set()
-        dataset.wait_for_prefetch()
-        assert len(list(Path(config.artifact_dir).rglob("*.hdf5"))) == 1
+def test_batched_reader_preserves_rows_metadata_and_duplicates(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.batch_size = 2
+    config.training_max_steps = None
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    _write_artifact(root)
+    module = gems.GemsDataModule(config, seed=7)
+    dataset = module._datasets["train"]
+    expected = {
+        key: [] for key in ("spectra", "precursor_mz_raw", "collision_energy", "charge")
+    }
+    for shard in module.artifact.train_shards(0):
+        with h5py.File(root / shard.path, "r") as file:
+            eligible = file["training_eligible"][:]
+            for key, name in (
+                ("spectra", "spectrum"),
+                ("precursor_mz_raw", "precursor_mz"),
+                ("collision_energy", "collision_energy"),
+                ("charge", "charge"),
+            ):
+                expected[key].append(file[name][:][eligible])
+    indices = [7, 0, 3, 7, 2, 11]
+    try:
+        batch = dataset[indices]
+        for key, parts in expected.items():
+            np.testing.assert_array_equal(batch[key], np.concatenate(parts)[indices])
+        np.testing.assert_array_equal(batch["index"], indices)
+        empty = dataset[[]]
+        assert empty["spectra"].shape == (0, 2, 128)
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize("fault", ["shape", "dtype", "eligibility", "metadata"])
+def test_invalid_shard_closes_file(tmp_path: Path, monkeypatch, fault: str) -> None:
+    config = _config(tmp_path)
+    config.batch_size = 2
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    _write_artifact(root)
+    module = gems.GemsDataModule(config, seed=7)
+    dataset = module._datasets["train"]
+    with h5py.File(dataset.paths[0], "a") as file:
+        if fault in {"shape", "dtype"}:
+            del file["spectrum"]
+            file.create_dataset(
+                "spectrum",
+                shape=(4, 128, 2) if fault == "shape" else (4, 2, 128),
+                dtype=np.float64 if fault == "dtype" else np.float32,
+            )
+        elif fault == "eligibility":
+            file["training_eligible"][:] = False
+        else:
+            del file["charge"]
+    opened = []
+    original = h5py.File
+
+    def open_file(*args, **kwargs):
+        file = original(*args, **kwargs)
+        opened.append(file)
+        return file
+
+    monkeypatch.setattr(h5py, "File", open_file)
+    with pytest.raises(KeyError if fault == "metadata" else ValueError):
+        dataset[[0]]
+    assert opened and not opened[0].id.valid
+    assert not dataset.files
+
+
+@pytest.mark.parametrize("task", ["pretrain", "sjepa", "grouped_jepa", "ar_spectra"])
+@pytest.mark.parametrize("workers", [0, 1])
+def test_all_tasks_use_batched_loaders(tmp_path: Path, task: str, workers: int) -> None:
+    from spectra_learning.data.ar_spectra import SpectraARGemsDataModule
+    from spectra_learning.data.gems.grouped import GroupedGemsDataModule
+    from spectra_learning.training.pretrain_jax import _shutdown_torch_loader_iterator
+
+    config = _config(tmp_path)
+    config.batch_size = 2
+    config.training_max_steps = None
+    config.training_task = task
+    config.training_mode = "sjepa" if task == "sjepa" else "mae"
+    config.dataloader_num_workers = workers
+    config.dataloader_multiprocessing_context = "spawn"
+    config.dataloader_output_format = "numpy"
+    config.dataloader_pin_memory = False
+    config.dataloader_persistent_workers = False
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    manifest = _write_artifact(root)
+    module_type = gems.GemsDataModule
+    if task == "grouped_jepa":
+        config.group_jepa_groups_per_batch = 1
+        config.group_jepa_spectra_per_group = 2
+        config.group_jepa_teacher_spectra_per_group = 1
+        for split in manifest["splits"].values():
+            for shard in split["shards"]:
+                with h5py.File(root / shard["path"], "a") as file:
+                    file["global_group_id"][:] = 0
+                    file["group_id"][:] = 0
+        module_type = GroupedGemsDataModule
+    elif task == "ar_spectra":
+        # AR has no JEPA masks, regardless of unused masking defaults.
+        config.jepa_num_target_blocks = 10
+        module_type = SpectraARGemsDataModule
+    module = module_type(config, seed=7)
+    try:
+        for loader in (
+            module.train_loader_for_epoch(0),
+            module.val_loader_for_eval(augment=False),
+        ):
+            iterator = iter(loader)
+            try:
+                batch = next(iterator)
+                assert all(isinstance(value, np.ndarray) for value in batch.values())
+                if task == "ar_spectra":
+                    assert batch["input_token_ids"].shape[0] == 2
+                elif task == "grouped_jepa":
+                    assert batch["peak_mz"].shape == (1, 2, 4)
+                else:
+                    assert batch["peak_mz"].shape == (2, 4)
+            finally:
+                _shutdown_torch_loader_iterator(iterator)
+    finally:
+        for dataset in module._datasets.values():
+            dataset.close()
+
+
+def test_workers_are_per_process_and_resume_preserves_batch_suffix(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    config = _config(tmp_path)
+    config.training_max_steps = None
+    config.dataloader_num_workers = 4
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    manifest = _write_artifact(root)
+    manifest["splits"]["train"]["shards"] = [
+        _write_shard(root / shard["path"], 4, np.asarray([True, False, True, False]))
+        for shard in manifest["splits"]["train"]["shards"]
+    ]
+    manifest["splits"]["train"]["eligible_rows"] = 8
+    manifest["eligible_rows"] = 12
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    module = gems.GemsDataModule(
+        config, seed=7, distributed_world_size=2, distributed_rank=0
+    )
+    assert module.dataloader_num_workers == 4
+    module.dataloader_num_workers = 0
+    full = list(module.train_loader_for_epoch(0).sampler)
+    resumed = list(module.train_loader_for_epoch(0, start_batch=1).sampler)
+    assert resumed == full[1:]
+    batch = next(iter(module.train_loader_for_epoch(0)))
+    assert all(isinstance(value, torch.Tensor) for value in batch.values())
+    module.set_gradient_accumulation_steps(2)
+    resumed = list(module.train_loader_for_epoch(0, start_batch=1).sampler)
+    assert [index for batch in resumed for index in batch] == [
+        index for batch in full[1:] for index in batch
+    ]
+    for dataset in module._datasets.values():
+        dataset.close()
 
 
 def test_repacker_uses_soft_byte_target_and_preserves_metadata(
@@ -476,10 +551,7 @@ def test_repacker_uses_soft_byte_target_and_preserves_metadata(
     source_manifest.write_text(json.dumps(manifest))
 
     groups = repacker.plan_shard_groups(
-        [
-            {"bytes": size}
-            for size in (4, 5, 6, 5, 4, 6)
-        ],
+        [{"bytes": size} for size in (4, 5, 6, 5, 4, 6)],
         target_bytes=10,
     )
     assert [sum(item["bytes"] for item in group) for group in groups] == [
@@ -500,8 +572,7 @@ def test_repacker_uses_soft_byte_target_and_preserves_metadata(
     assert len(repacked["splits"]["train"]["shards"]) == 1
     assert len(repacked["splits"]["validation"]["shards"]) == 1
     train_path = (
-        repacked_manifest.parent
-        / repacked["splits"]["train"]["shards"][0]["path"]
+        repacked_manifest.parent / repacked["splits"]["train"]["shards"][0]["path"]
     )
     with h5py.File(train_path) as file:
         assert len(file["spectrum"]) == 16
@@ -510,12 +581,7 @@ def test_repacker_uses_soft_byte_target_and_preserves_metadata(
 
 
 def test_massive_v2_contract_mismatch_fails_fast(tmp_path: Path) -> None:
-    artifact = (
-        tmp_path
-        / "cache"
-        / "gems"
-        / "unit--massive-v2--unit-revision"
-    )
+    artifact = tmp_path / "cache" / "gems" / "unit--massive-v2--unit-revision"
     manifest = _write_artifact(artifact)
     manifest["eligibility"]["max_precursor_mz"] = 2000.0
     (artifact / "manifest.json").write_text(json.dumps(manifest))
@@ -544,9 +610,7 @@ def test_repair_recomputes_training_eligibility_from_spectra(
             shard["eligible_rows"] = shard["rows"]
             shard["bytes"] = path.stat().st_size
             shard["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-        manifest["splits"][split]["eligible_rows"] = manifest["splits"][
-            split
-        ]["rows"]
+        manifest["splits"][split]["eligible_rows"] = manifest["splits"][split]["rows"]
     manifest["eligible_rows"] = manifest["rows"]
     manifest_path = artifact / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
@@ -862,3 +926,69 @@ def test_converter_regroups_project_restart_within_one_shard(
     ]
     with h5py.File(output_dir / regrouped[0]["path"], "r") as file:
         assert np.all(np.diff(file["global_group_id"][:]) >= 0)
+
+
+@pytest.mark.parametrize("task", ["pretrain", "sjepa", "ar_spectra"])
+@pytest.mark.parametrize("seed", [0, 7, 19])
+def test_columnar_collation_preserves_sample_adapter_randomness(tmp_path, task, seed):
+    import torch
+    from spectra_learning.data.ar_spectra import SpectraARGemsDataModule
+
+    config = _config(tmp_path)
+    config.batch_size = 2
+    config.training_task = task
+    config.training_mode = "sjepa" if task == "sjepa" else "mae"
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    _write_artifact(root)
+    module_type = (
+        SpectraARGemsDataModule if task == "ar_spectra" else gems.GemsDataModule
+    )
+    module = module_type(config, seed=7)
+    dataset = module._datasets["train"]
+    try:
+        raw = dataset[[1, 0, 1, 2]]
+        samples = [{key: value[i] for key, value in raw.items()} for i in range(4)]
+        collator = module._collator(augment=True, metadata_dropout=True)
+        torch.manual_seed(seed)
+        columnar = collator(raw)
+        after_columnar = torch.get_rng_state()
+        torch.manual_seed(seed)
+        adapted = collator(samples)
+        assert torch.equal(after_columnar, torch.get_rng_state())
+        assert columnar.keys() == adapted.keys()
+        for key in columnar:
+            np.testing.assert_array_equal(columnar[key], adapted[key])
+    finally:
+        for dataset in module._datasets.values():
+            dataset.close()
+
+
+def test_torch_persistent_workers_across_epochs(tmp_path):
+    import torch
+    from spectra_learning.training.pretrain_jax import _shutdown_torch_loader_iterator
+
+    config = _config(tmp_path)
+    config.batch_size = 2
+    config.training_max_steps = None
+    config.dataloader_num_workers = 1
+    config.dataloader_multiprocessing_context = "spawn"
+    config.dataloader_persistent_workers = True
+    root = Path(config.artifact_dir) / "gems" / "unit--massive-v2--unit-revision"
+    _write_artifact(root)
+    module = gems.GemsDataModule(config, seed=7)
+    try:
+        for epoch in (0, 1):
+            loader = module.train_loader_for_epoch(epoch)
+            assert loader.persistent_workers
+            iterator = iter(loader)
+            try:
+                batches = list(iterator)
+                assert len(batches) == module.train_steps
+                assert all(
+                    isinstance(value, torch.Tensor) for value in batches[0].values()
+                )
+            finally:
+                _shutdown_torch_loader_iterator(iterator)
+    finally:
+        for dataset in module._datasets.values():
+            dataset.close()

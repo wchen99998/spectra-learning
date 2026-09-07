@@ -12,6 +12,7 @@ from spectra_learning.data.gems.masking import (
     _normalize_mask_strategy_names,
     _sample_all_mask_strategies_torch,
     _sample_block_masks_torch,
+    _sample_random_mask_1d_torch,
 )
 from spectra_learning.data.gems.gap_aware import (
     DEFAULT_GAP_AWARE_BUCKET_EDGES_DA,
@@ -120,7 +121,9 @@ class GemsBatchCollator:
             spectrum_metadata_dropout_probability
         )
 
-    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
+    def __call__(
+        self, samples: list[dict[str, Any]] | dict[str, np.ndarray]
+    ) -> dict[str, Any]:
         batch = self._preprocess(samples)
         if self.augment:
             batch = self._replace_rows_without_context_and_targets(batch)
@@ -148,20 +151,28 @@ class GemsBatchCollator:
         ]
         return {key: value[row_indices] for key, value in batch.items()}
 
-    def _preprocess(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        if isinstance(samples[0]["spectra"], np.ndarray):
+    def _preprocess(
+        self,
+        samples: list[dict[str, Any]] | dict[str, np.ndarray],
+    ) -> dict[str, torch.Tensor]:
+        if isinstance(samples, dict):
             return self._preprocess_numpy(samples)
+        if isinstance(samples[0]["spectra"], np.ndarray):
+            # Sample-based probes share preprocessing with the batched reader.
+            return self._preprocess_numpy(
+                {
+                    key: np.stack([sample[key] for sample in samples])
+                    for key in samples[0]
+                }
+            )
         return self._preprocess_torch(samples)
 
     def _preprocess_numpy(
         self,
-        samples: list[dict[str, Any]],
+        samples: dict[str, np.ndarray],
     ) -> dict[str, torch.Tensor]:
-        spectra = np.stack([sample["spectra"] for sample in samples], axis=0)
-        precursor_mz_raw = np.asarray(
-            [sample["precursor_mz_raw"] for sample in samples],
-            dtype=np.float32,
-        )
+        spectra = samples["spectra"]
+        precursor_mz_raw = np.asarray(samples["precursor_mz_raw"], dtype=np.float32)
         batch = preprocess_peak_batch_numpy(
             spectra,
             precursor_mz_raw,
@@ -204,23 +215,18 @@ class GemsBatchCollator:
     def _add_numpy_spectrum_metadata(
         self,
         batch: dict[str, np.ndarray],
-        samples: list[dict[str, Any]],
+        samples: dict[str, np.ndarray],
     ) -> None:
-        collision_energy = np.asarray(
-            [sample["collision_energy"] for sample in samples],
-            dtype=np.float32,
-        )
         batch["collision_energy"] = (
-            np.clip(collision_energy, 0.0, COLLISION_ENERGY_MAX)
+            np.clip(samples["collision_energy"], 0.0, COLLISION_ENERGY_MAX)
             / COLLISION_ENERGY_MAX
         ).astype(np.float32)
         batch["charge"] = canonicalize_precursor_charge_numpy(
-            np.asarray(
-                [sample["charge"] for sample in samples],
-                dtype=np.float32,
-            )
+            np.asarray(samples["charge"], dtype=np.float32)
         )
-        self._add_numpy_acquisition_metadata(batch, samples)
+        if self.spectrum_metadata_schema == MASSIVE_V2_ACQUISITION_SCHEMA:
+            for key in ACQUISITION_METADATA_KEYS:
+                batch[key] = np.asarray(samples[key], dtype=np.float32)
 
     def _add_torch_spectrum_metadata(
         self,
@@ -230,29 +236,19 @@ class GemsBatchCollator:
         collision_energy = torch.stack(
             [torch.as_tensor(sample["collision_energy"]) for sample in samples],
         ).to(dtype=torch.float32)
-        batch["collision_energy"] = collision_energy.clamp(
-            0.0,
-            COLLISION_ENERGY_MAX,
-        ) / COLLISION_ENERGY_MAX
+        batch["collision_energy"] = (
+            collision_energy.clamp(
+                0.0,
+                COLLISION_ENERGY_MAX,
+            )
+            / COLLISION_ENERGY_MAX
+        )
         batch["charge"] = canonicalize_precursor_charge_torch(
             torch.stack(
                 [torch.as_tensor(sample["charge"]) for sample in samples],
             )
         )
         self._add_torch_acquisition_metadata(batch, samples)
-
-    def _add_numpy_acquisition_metadata(
-        self,
-        batch: dict[str, np.ndarray],
-        samples: list[dict[str, Any]],
-    ) -> None:
-        if self.spectrum_metadata_schema != MASSIVE_V2_ACQUISITION_SCHEMA:
-            return
-        for key in ACQUISITION_METADATA_KEYS:
-            batch[key] = np.asarray(
-                [sample[key] for sample in samples],
-                dtype=np.float32,
-            )
 
     def _add_torch_acquisition_metadata(
         self,
@@ -396,3 +392,60 @@ class GemsBatchCollator:
             context_mask[rows] = strategy_context[rows]
             target_masks[rows] = strategy_targets[rows]
         return context_mask, target_masks
+
+
+class SJEPABatchCollator(GemsBatchCollator):
+    def __init__(
+        self,
+        *,
+        num_global_views: int,
+        num_local_views: int,
+        global_view_fraction: float,
+        local_view_fraction: float,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.num_global_views = num_global_views
+        self.num_local_views = num_local_views
+        self.global_view_fraction = global_view_fraction
+        self.local_view_fraction = local_view_fraction
+
+    def __call__(
+        self, samples: list[dict[str, Any]] | dict[str, np.ndarray]
+    ) -> dict[str, Any]:
+        batch = self._preprocess(samples)
+        valid_mask = batch["peak_valid_mask"]
+        batch["sjepa_global_view_masks"] = self._sample_views(
+            valid_mask,
+            num_views=self.num_global_views,
+            fraction=self.global_view_fraction,
+        )
+        batch["sjepa_local_view_masks"] = self._sample_views(
+            valid_mask,
+            num_views=self.num_local_views,
+            fraction=self.local_view_fraction,
+        )
+        return format_batch(batch, self.output_format)
+
+    @staticmethod
+    def _sample_views(
+        valid_mask: torch.Tensor,
+        *,
+        num_views: int,
+        fraction: float,
+    ) -> torch.Tensor:
+        masks = torch.zeros(
+            valid_mask.shape[0],
+            num_views,
+            valid_mask.shape[1],
+            dtype=torch.bool,
+            device=valid_mask.device,
+        )
+        for row_idx, row_valid in enumerate(valid_mask):
+            retain_count = max(round(int(row_valid.sum()) * fraction), 1)
+            for view_idx in range(num_views):
+                masks[row_idx, view_idx] = _sample_random_mask_1d_torch(
+                    row_valid,
+                    mask_count=retain_count,
+                )
+        return masks

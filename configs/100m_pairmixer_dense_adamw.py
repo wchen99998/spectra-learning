@@ -29,7 +29,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_transition_type = "swiglu"
     cfg.num_peaks = 47
     cfg.num_epochs = 98
-    cfg.dataloader_num_workers = 32
+    cfg.dataloader_num_workers = 4
     cfg.msg_probe_every_n_steps = -1
     cfg.msg_probe_at_final_step = False
     cfg.nist_murcko_probe_num_repeats = 1

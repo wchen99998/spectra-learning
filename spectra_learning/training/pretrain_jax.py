@@ -323,6 +323,8 @@ def build_jax_optax_transform(
             shard_axis=shard_axis,
             shard_count=shard_count,
         )
+    elif optimizer == "adam":
+        transform = _jax_adam_transform(config, total_steps=total_steps)
     else:
         transform = _jax_adamw_transform(config, total_steps=total_steps)
     if grad_clip_norm > 0.0:
@@ -400,6 +402,29 @@ def _jax_adamw_transform(
         b2=b2,
         weight_decay=weight_decay,
         mask=_jax_weight_decay_mask,
+    )
+
+
+def _jax_adam_transform(
+    config: Any,
+    *,
+    total_steps: int | None = None,
+) -> optax.GradientTransformation:
+    learning_rate = _jax_learning_rate_schedule(config, total_steps=total_steps)
+    b1 = float(config.get("b1", 0.9))
+    b2 = float(config.get("b2", 0.999))
+    optimizer_state_dtype = str(
+        config.get("optimizer_state_dtype", "fp32")
+    ).lower()
+    if optimizer_state_dtype in {"bf16", "bfloat16"}:
+        return optax.chain(
+            _jax_scale_by_adam_bf16_states(b1=b1, b2=b2),
+            optax.scale_by_learning_rate(learning_rate),
+        )
+    return optax.adam(
+        learning_rate=learning_rate,
+        b1=b1,
+        b2=b2,
     )
 
 
@@ -1129,7 +1154,7 @@ def _train_and_evaluate_jax_task(
     datamodule = task.build_datamodule(
         config,
         jax.process_count(),
-        jax.process_index(),
+        int(os.environ.get("SPECTRA_GEMS_RANK", jax.process_index())),
     )
     total_steps = total_training_steps(config, datamodule)
     model = task.build_model(config, datamodule)
@@ -1224,6 +1249,8 @@ def prepare_jax_training_config(config: config_dict.ConfigDict) -> None:
         raise ValueError(
             "jax_msg_probe_shard_batches has been removed; MSG probe batches are unsharded"
         )
+    if "device_prefetch_size" in config:
+        del config["device_prefetch_size"]
     config.dataloader_pin_memory = False
     config.dataloader_persistent_workers = False
     config.dataloader_output_format = "numpy"
@@ -1250,12 +1277,11 @@ def _build_pretrain_jax_datamodule(
     process_count: int,
     process_index: int,
 ) -> GemsDataModule:
-    data_rank = int(os.environ.get("SPECTRA_GEMS_RANK", process_index))
     return GemsDataModule(
         config,
         seed=int(config.seed),
         distributed_world_size=process_count,
-        distributed_rank=data_rank,
+        distributed_rank=process_index,
         distributed_local_rank=0,
     )
 
@@ -1315,10 +1341,8 @@ def initialize_jax_model_from_torch_seed(
 
 _JAX_PROFILE_TIMING_NAMES = (
     "dataloader_seconds",
+    "stack_seconds",
     "transfer_seconds",
-    "grad_seconds",
-    "accumulate_seconds",
-    "apply_seconds",
     "compiled_step_seconds",
 )
 _JAX_TIME_LIMIT_CHECK_EVERY_STEPS = 100
@@ -1446,6 +1470,7 @@ class _JaxTrainingLoop:
         )
         self.stopped_for_time_limit = False
         self.stopped_for_termination = False
+        self.use_sjepa = str(config.get("training_task", "")).lower() == "sjepa"
         self.use_mask_schedule = (
             isinstance(model, PeakSetJEPAJax)
             and "jepa_context_fraction_schedule" in config
@@ -1854,108 +1879,108 @@ class _JaxTrainingLoop:
             else None
         )
         lookahead_target_age = 1 if lookahead_target is not None else None
-        while self.global_step < self.total_steps:
-            if self._time_limit_reached():
-                break
-            if loader_stage_index != self.mask_stage_index:
-                _shutdown_torch_loader_iterator(loader_iter)
-                del loader_iter, loader
-                current_epoch_batch = (
-                    self.global_step - epoch * self.datamodule.train_steps
-                )
-                loader = self.datamodule.train_loader_for_epoch(
-                    epoch,
-                    start_batch=current_epoch_batch,
-                )
-                loader_iter = iter(loader)
-                loader_stage_index = self.mask_stage_index
-                lookahead_batch = None
-                lookahead_target = None
-                lookahead_target_age = None
-            next_lookahead_batch = None
-            if self.group_jepa_lookahead:
-                if lookahead_batch is None:
-                    lookahead_batch = self._next_accumulated_batch(loader_iter)
-                    if lookahead_batch is None:
-                        break
-                    if lookahead_target is None:
-                        lookahead_target = self.teacher_target_step(
-                            self.state.trainable_params,
-                            self.state.static_state,
-                            lookahead_batch,
-                        )
-                        lookahead_target_age = 0
-                batch = {
-                    **lookahead_batch,
-                    GROUP_JEPA_TEACHER_TARGET_KEY: lookahead_target,
-                    GROUP_JEPA_TEACHER_TARGET_AGE_KEY: jnp.full(
-                        lookahead_target.shape[:2],
-                        lookahead_target_age,
-                        dtype=jnp.float32,
-                    ),
-                }
-                if self.global_step + 1 < self.total_steps:
-                    next_lookahead_batch = self._next_accumulated_batch(loader_iter)
-                teacher_batch = (
-                    next_lookahead_batch
-                    if next_lookahead_batch is not None
-                    else lookahead_batch
-                )
-            else:
-                batch = self._next_accumulated_batch(loader_iter)
-                if batch is None:
+        try:
+            while self.global_step < self.total_steps:
+                if self._time_limit_reached():
                     break
-                teacher_batch = None
-            self._start_measurement_if_ready()
-            self._start_profile_if_ready()
-            metrics, next_lookahead_target = self._train_batch(
-                batch,
-                teacher_batch,
-            )
-            if self.group_jepa_lookahead:
-                lookahead_batch = next_lookahead_batch
-                lookahead_target = (
-                    next_lookahead_target
-                    if next_lookahead_batch is not None
-                    else None
+                if loader_stage_index != self.mask_stage_index:
+                    _shutdown_torch_loader_iterator(loader_iter)
+                    current_epoch_batch = (
+                        self.global_step - epoch * self.datamodule.train_steps
+                    )
+                    loader = self.datamodule.train_loader_for_epoch(
+                        epoch,
+                        start_batch=current_epoch_batch,
+                    )
+                    loader_iter = iter(loader)
+                    loader_stage_index = self.mask_stage_index
+                    lookahead_batch = None
+                    lookahead_target = None
+                    lookahead_target_age = None
+                self._start_measurement_if_ready()
+                next_lookahead_batch = None
+                if self.group_jepa_lookahead:
+                    if lookahead_batch is None:
+                        lookahead_batch = self._next_accumulated_batch(loader_iter)
+                        if lookahead_batch is None:
+                            break
+                        if lookahead_target is None:
+                            lookahead_target = self.teacher_target_step(
+                                self.state.trainable_params,
+                                self.state.static_state,
+                                lookahead_batch,
+                            )
+                            lookahead_target_age = 0
+                    batch = {
+                        **lookahead_batch,
+                        GROUP_JEPA_TEACHER_TARGET_KEY: lookahead_target,
+                        GROUP_JEPA_TEACHER_TARGET_AGE_KEY: jnp.full(
+                            lookahead_target.shape[:2],
+                            lookahead_target_age,
+                            dtype=jnp.float32,
+                        ),
+                    }
+                    if self.global_step + 1 < self.total_steps:
+                        next_lookahead_batch = self._next_accumulated_batch(loader_iter)
+                    teacher_batch = (
+                        next_lookahead_batch
+                        if next_lookahead_batch is not None
+                        else lookahead_batch
+                    )
+                else:
+                    batch = self._next_accumulated_batch(loader_iter)
+                    if batch is None:
+                        break
+                    teacher_batch = None
+                self._start_profile_if_ready()
+                metrics, next_lookahead_target = self._train_batch(
+                    batch,
+                    teacher_batch,
                 )
-                lookahead_target_age = (
-                    1 if next_lookahead_batch is not None else None
+                if self.group_jepa_lookahead:
+                    lookahead_batch = next_lookahead_batch
+                    lookahead_target = (
+                        next_lookahead_target
+                        if next_lookahead_batch is not None
+                        else None
+                    )
+                    lookahead_target_age = (
+                        1 if next_lookahead_batch is not None else None
+                    )
+                    self.state.lookahead_teacher_target = (
+                        next_lookahead_target
+                        if next_lookahead_batch is not None
+                        else self.state.lookahead_teacher_target
+                    )
+                    valid = jnp.asarray(next_lookahead_batch is not None)
+                    self.state.lookahead_target_valid = (
+                        _replicate_tree_on_data_mesh(valid, self.data_mesh)
+                        if self.use_sharded_step
+                        else valid
+                    )
+                pbar.update(1)
+                if self._emergency_checkpoint_requested():
+                    self._save_emergency_checkpoint_and_wait()
+                    break
+                self._log_or_stage_train_metrics(metrics, epoch=epoch, pbar=pbar)
+                self._activate_mask_stage(self.global_step)
+                self._run_scheduled_work(pbar)
+            if self.pending_train_metrics is not None and (
+                self.stopped_for_time_limit
+                or self.stopped_for_termination
+                or self.global_step >= self.total_steps
+                or epoch == loop_epochs - 1
+            ):
+                _log_jax_train_metrics(
+                    self.config,
+                    self.logger,
+                    pbar,
+                    self.pending_train_metrics,
                 )
-                self.state.lookahead_teacher_target = (
-                    next_lookahead_target
-                    if next_lookahead_batch is not None
-                    else self.state.lookahead_teacher_target
-                )
-                valid = jnp.asarray(next_lookahead_batch is not None)
-                self.state.lookahead_target_valid = (
-                    _replicate_tree_on_data_mesh(valid, self.data_mesh)
-                    if self.use_sharded_step
-                    else valid
-                )
-            pbar.update(1)
-            if self._emergency_checkpoint_requested():
-                self._save_emergency_checkpoint_and_wait()
-                break
-            self._log_or_stage_train_metrics(metrics, epoch=epoch, pbar=pbar)
-            self._activate_mask_stage(self.global_step)
-            self._run_scheduled_work(pbar)
-        if self.pending_train_metrics is not None and (
-            self.stopped_for_time_limit
-            or self.stopped_for_termination
-            or self.global_step >= self.total_steps
-            or epoch == loop_epochs - 1
-        ):
-            _log_jax_train_metrics(
-                self.config,
-                self.logger,
-                pbar,
-                self.pending_train_metrics,
-            )
-            self.pending_train_metrics = None
-        pbar.close()
-        _shutdown_torch_loader_iterator(loader_iter)
-        del loader_iter, loader
+                self.pending_train_metrics = None
+        finally:
+            pbar.close()
+            _shutdown_torch_loader_iterator(loader_iter)
 
     def _time_limit_reached(self) -> bool:
         if self.deadline is None:
@@ -2018,7 +2043,6 @@ class _JaxTrainingLoop:
 
     def _next_accumulated_batch(self, loader_iter: Any) -> dict[str, Any] | None:
         dataloader_elapsed = 0.0
-        transfer_elapsed = 0.0
         micro_batches = []
         for _ in range(self.grad_accum_steps):
             dataloader_start = time.perf_counter()
@@ -2027,13 +2051,21 @@ class _JaxTrainingLoop:
             except StopIteration:
                 break
             dataloader_elapsed += time.perf_counter() - dataloader_start
-            transfer_start = time.perf_counter()
             micro_batches.append(torch_batch)
-            transfer_elapsed += time.perf_counter() - transfer_start
         if len(micro_batches) < self.grad_accum_steps:
             return None
+        stack_start = time.perf_counter()
+        stacked_batch = _stack_micro_batches(micro_batches)
+        if self.use_sjepa:
+            stacked_batch["sjepa_sigreg_step"] = np.full(
+                stacked_batch["peak_mz"].shape[:2],
+                self.global_step,
+                dtype=np.uint32,
+            )
+        stack_elapsed = time.perf_counter() - stack_start
+        transfer_start = time.perf_counter()
         batch = numpy_batch_to_jax(
-            _stack_micro_batches(micro_batches),
+            stacked_batch,
             data_mesh=self.data_mesh if self.use_sharded_step else None,
             batch_axis=1,
         )
@@ -2041,14 +2073,15 @@ class _JaxTrainingLoop:
             jax.block_until_ready(batch)
         if self.measured_start is not None:
             self.timing["dataloader_seconds"] += dataloader_elapsed
-            self.timing["transfer_seconds"] += transfer_elapsed
+            self.timing["stack_seconds"] += stack_elapsed
+            self.timing["transfer_seconds"] += time.perf_counter() - transfer_start
             self.timing["measured_microbatches"] += float(self.grad_accum_steps)
         return batch
 
     def _start_measurement_if_ready(self) -> None:
         if self.measured_start is not None or self.global_step < self.warmup_steps:
             return
-        jax.effects_barrier()
+        jax.block_until_ready(self.state.trainable_params)
         self.measured_start = time.perf_counter()
 
     def _start_profile_if_ready(self) -> None:
@@ -2329,6 +2362,7 @@ class _JaxTrainingLoop:
                 self.global_step * global_batch_size,
                 wall_elapsed,
             ),
+            "run/input_timing_mode": "synchronized" if self.timing_barriers else "dispatch",
             "run/measured_steps": float(self.measured_steps),
             "run/measured_wall_elapsed_seconds": measured_wall_elapsed,
             "run/measured_non_train_elapsed_seconds": measured_non_train_elapsed,
@@ -2482,18 +2516,24 @@ def _evaluate_jax_validation_loss(
 ) -> dict[str, float]:
     totals: dict[str, float] = {}
     steps = 0
-    for torch_batch in datamodule.val_loader_for_eval(augment=True):
-        if steps >= max_steps:
-            break
-        batch = numpy_batch_to_jax(
-            torch_batch,
-            data_mesh=data_mesh if use_sharded_step else None,
-            batch_axis=0,
-        )
-        metrics = jax.device_get(eval_step(trainable_params, static_state, batch))
-        for key, value in metrics.items():
-            totals[key] = totals.get(key, 0.0) + float(np.asarray(value))
-        steps += 1
+    loader_iter = iter(datamodule.val_loader_for_eval(augment=True))
+    try:
+        for _ in range(max_steps):
+            try:
+                torch_batch = next(loader_iter)
+            except StopIteration:
+                break
+            batch = numpy_batch_to_jax(
+                torch_batch,
+                data_mesh=data_mesh if use_sharded_step else None,
+                batch_axis=0,
+            )
+            metrics = jax.device_get(eval_step(trainable_params, static_state, batch))
+            for key, value in metrics.items():
+                totals[key] = totals.get(key, 0.0) + float(np.asarray(value))
+            steps += 1
+    finally:
+        _shutdown_torch_loader_iterator(loader_iter)
     if metric_reduction == "mean":
         metrics = {key: value / float(steps) for key, value in totals.items()}
     else:

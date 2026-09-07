@@ -51,8 +51,25 @@ def test_launcher_shape_comes_from_explicit_current_run_config():
     assert config.msg_probe_every_n_steps == -1
     assert config.val_every_n_steps == 10_000
     assert config.val_num_steps == 500
-    assert config.dataloader_num_workers == 32
+    assert config.dataloader_num_workers == 4
     assert config.msg_probe_at_final_step is False
+
+
+def test_v6e_defaults_to_multiregion_infra():
+    args, sky_args = train_sky.parse_args(
+        [
+            "--config",
+            TRAIN_CONFIG,
+            "--workdir",
+            TRAIN_WORKDIR,
+            "--tpu-generation",
+            "v6e",
+        ]
+    )
+
+    assert sky_args == []
+    assert args.region == ""
+    assert args.infra == "gcp"
 
 
 def test_region_flag_sets_gcp_infra():
@@ -441,6 +458,7 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert 'kill -TERM -- "-${TRAIN_PID}"' in task["run"]
     assert 'kill -KILL -- "-${TRAIN_PID}"' in task["run"]
     assert 'wait "${TRAIN_PID}"' in task["run"]
+    assert 'exit "${TRAIN_STATUS}"' in task["run"]
     assert "SPECTRA_AOT" not in task["run"]
     assert "precompile" not in task["run"].lower()
 

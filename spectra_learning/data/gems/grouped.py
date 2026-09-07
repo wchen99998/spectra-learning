@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sized
-from typing import Any, cast
+from collections.abc import Iterator
+from typing import cast
 
 import jax
 import numpy as np
@@ -137,9 +137,9 @@ class GroupedGemsBatchCollator:
         self.base = base
         self.spectra_per_group = spectra_per_group
 
-    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+    def __call__(self, samples: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         batch = cast(dict[str, np.ndarray], self.base(samples))
-        groups = len(samples) // self.spectra_per_group
+        groups = len(batch["peak_mz"]) // self.spectra_per_group
         return {
             key: value.reshape(groups, self.spectra_per_group, *value.shape[1:])
             for key, value in batch.items()
@@ -162,9 +162,11 @@ class GroupedGemsDataModule(GemsDataModule):
         )
         self.groups_per_batch = int(config.group_jepa_groups_per_batch)
         assert self.teacher_spectra_per_group < self.spectra_per_group
-        assert self.groups_per_batch % (
-            distributed_world_size * int(config.gradient_accumulation_steps)
-        ) == 0
+        assert (
+            self.groups_per_batch
+            % (distributed_world_size * int(config.gradient_accumulation_steps))
+            == 0
+        )
 
         data_config = config_dict.ConfigDict(config.to_dict())
         data_config.batch_size = self.groups_per_batch * self.spectra_per_group
@@ -184,8 +186,7 @@ class GroupedGemsDataModule(GemsDataModule):
             distributed_world_size * self.gradient_accumulation_steps
         )
         self._group_ranges = {
-            split: self._scan_group_ranges(split)
-            for split in ("train", "validation")
+            split: self._scan_group_ranges(split) for split in ("train", "validation")
         }
         local_micro_batches = len(
             GroupedBatchSampler(
@@ -211,8 +212,7 @@ class GroupedGemsDataModule(GemsDataModule):
                     len(starts) for starts, _counts in self._group_ranges["train"]
                 ),
                 "validation_groups": sum(
-                    len(starts)
-                    for starts, _counts in self._group_ranges["validation"]
+                    len(starts) for starts, _counts in self._group_ranges["validation"]
                 ),
                 "spectra_per_group": self.spectra_per_group,
                 "teacher_spectra_per_group": self.teacher_spectra_per_group,
@@ -226,7 +226,6 @@ class GroupedGemsDataModule(GemsDataModule):
     ) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
         dataset = self._datasets[split]
         assert isinstance(dataset, MassiveV2Hdf5ShardDataset)
-        dataset.wait_for_prefetch()
         ranges = tuple(
             dataset.grouped_logical_ranges(
                 shard_id,
@@ -276,26 +275,13 @@ class GroupedGemsDataModule(GemsDataModule):
             max_batches=max_batches,
             partition_count=partition_count,
             partition_index=partition_index,
-            active_shards=(
-                self.gems_hdf5_active_shards if split == "train" else 1
-            ),
+            active_shards=(self.gems_hdf5_active_shards if split == "train" else 1),
         )
-        dataset = self._datasets[split]
-        loader_kwargs: dict[str, Any] = {
-            "dataset": dataset,
-            "batch_sampler": sampler,
-            "num_workers": self.dataloader_num_workers,
-            "pin_memory": False,
-            "collate_fn": self._grouped_collator(),
-        }
-        if self.dataloader_num_workers > 0:
-            loader_kwargs["persistent_workers"] = False
-            loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
-            if self.dataloader_multiprocessing_context:
-                loader_kwargs["multiprocessing_context"] = (
-                    self.dataloader_multiprocessing_context
-                )
-        return DataLoader(**loader_kwargs)
+        return self._loader_for_sampler(
+            split=split,
+            batch_sampler=sampler,
+            collator=self._grouped_collator(),
+        )
 
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0) -> DataLoader:
         remaining_steps = max(0, self.train_steps - start_batch)

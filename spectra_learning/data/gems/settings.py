@@ -71,6 +71,12 @@ class GemsDataConfig:
     jepa_gap_aware_bucket_edges_da: tuple[float, ...]
     jepa_gap_aware_bucket_weights: tuple[float, ...]
     jepa_allow_target_overlap: bool
+    training_task: str
+    training_mode: str
+    sjepa_num_global_views: int
+    sjepa_num_local_views: int
+    sjepa_global_view_fraction: float
+    sjepa_local_view_fraction: float
     num_peaks: int
     dataloader_pin_memory: bool
     dataloader_num_workers: int
@@ -207,6 +213,16 @@ class GemsDataConfig:
             ),
             jepa_allow_target_overlap=bool(
                 config.get("jepa_allow_target_overlap", False)
+            ),
+            training_task=str(config.get("training_task", "pretrain")).lower(),
+            training_mode=str(config.get("training_mode", "jepa")).lower(),
+            sjepa_num_global_views=int(config.get("sjepa_num_global_views", 1)),
+            sjepa_num_local_views=int(config.get("sjepa_num_local_views", 3)),
+            sjepa_global_view_fraction=float(
+                config.get("sjepa_global_view_fraction", 0.75)
+            ),
+            sjepa_local_view_fraction=float(
+                config.get("sjepa_local_view_fraction", 0.20)
             ),
             num_peaks=int(config.get("num_peaks", DEFAULT_NUM_PEAKS)),
             dataloader_pin_memory=bool(

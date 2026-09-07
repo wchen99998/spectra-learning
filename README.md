@@ -79,20 +79,35 @@ Repack the validated source artifact toward the soft byte target with:
   --upload
 ```
 
-Initialization blocks only on `manifest.json`; the first assigned train shard
-starts downloading in the background while model setup continues. The
-manifest assigns whole shards to training hosts deterministically, and reading
-shard N prefetches shard N+1 in the sampler's actual shuffled order. Downloads
-use a process lock, and only one future shard is prefetched. Shuffling keeps
-each shard's blocks together so startup does not fetch the full assignment.
-Grouped entities use
-`(massive_id, global_group_id)` as their corpus-wide identity and never cross
-train/validation or output-shard boundaries.
+Stage the manifest and every assigned train/validation shard before training.
+The Sky launcher does this during setup. For a manual launch, run this on each
+training host with the same config, overrides, seed, world size, and data rank
+that training will use:
 
-The old `fdataloader.shards.v1` reader remains temporarily available for
-existing v1 runs through `configs/pretrain_massive_v1.py`. Remove it after one
-complete multi-host v2 training run succeeds and no active resume still points
-at a v1 checkpoint.
+```bash
+.venv/bin/python -m spectra_learning.data.gems.materialize \
+  --config configs/1b_singlemixer_dense_muon_metadata_adaln.py \
+  --world-size 8 --rank 0
+```
+
+Replace rank 0 with that host's data rank. `SPECTRA_GEMS_RANK`, when set, selects
+the staged data assignment for every JAX task; otherwise JAX's process index is
+used. Training validates local files and performs no downloads. Staging owns
+download locks. Whole-shard assignments, rolling-pool mixing, lane selection,
+group membership, and resume offsets retain their existing algorithms.
+Grouped entities use `(massive_id, global_group_id)` as their corpus-wide
+identity and never cross train/validation or output-shard boundaries.
+
+`dataloader_num_workers` now means workers **per training process**, including
+PyTorch processes. JAX presets use 4 workers with prefetch factor 2. The unused
+JAX `device_prefetch_size` setting is removed during config preparation. Tune
+workers against each host's CPU, RAM, and storage bandwidth; see
+[the input pipeline benchmark guide](docs/jax_input_pipeline.md).
+
+GeMS training now requires MassIVE v2 for both JAX and PyTorch. The old
+`fdataloader.shards.v1` reader and `configs/pretrain_massive_v1.py` have been
+removed, and AR uses v2. Resume v1 checkpoints with the earlier repository
+revision that created them; this change does not migrate their data contracts.
 
 ## SLURM Multi-Node Training
 
@@ -205,7 +220,11 @@ The generated YAML uses the GCE `tpu7x-standard-4t` machine type with
 Flex-start DWS. TPU7x runs use a TPU workload policy, a regional MIG, and a
 bulk target size for the full topology; they do not use the generic MIG resize
 request path. Flex-start is restricted to `us-central1-c`, so the launcher
-targets `gcp/us-central1`. The default `--sky-bin` is the vendored SkyPilot
+targets `gcp/us-central1`. TPU v6e launches instead default to unpinned `gcp`
+infra, which makes the vendored SkyPilot client submit Flex-start requests in
+parallel across all six supported v6e regions and keep the first allocation.
+Pass `--region` only when intentionally pinning a v6e run. The default
+`--sky-bin` is the vendored SkyPilot
 executable at `/home/wuhao/skypilot/.venv/bin/sky`; that build contains the
 Compute Engine TPU7x workload-policy support required by this launcher.
 If `sky status -u` shows an existing `sky-jobs-controller-*` created by an older

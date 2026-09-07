@@ -154,7 +154,6 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
             batch_index += 1
 
     def _rolling_mixed_batches(self) -> Iterator[list[int]]:
-        assert self.active_segments >= len(self.segment_blocks)
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
         segment_order = self.segment_order()
