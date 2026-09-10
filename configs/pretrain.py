@@ -92,6 +92,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
     cfg.distogram_loss_weight = 0.0
+    cfg.distogram_pair_dim = None
+    cfg.distogram_multiscale_widths = ()
+    cfg.distogram_multiscale_weight = 0.0
     cfg.latent_pair_loss_weight = 0.0
     cfg.latent_pair_target_normalization = "none"
     cfg.jepa_mae_mz_bin_size = 0.5

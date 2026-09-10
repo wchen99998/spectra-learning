@@ -14,6 +14,7 @@ from spectra_learning.models.common_jax import (
     Array,
     Linear,
     RMSNorm,
+    activation_checkpoint_policy,
     pair_mask,
     scaled_dot_product_attention,
     silu,
@@ -292,7 +293,7 @@ class PairFeatureEmbedder(nnx.Module):
     def __init__(
         self,
         *,
-        single_dim: int,
+        single_dim: int | None,
         pair_dim: int,
         hidden_dim: int,
         mz_scale: float = PEAK_MZ_MAX,
@@ -309,6 +310,7 @@ class PairFeatureEmbedder(nnx.Module):
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.compute_dtype = compute_dtype
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
         self.mz_embedding = mz_embedding.lower()
@@ -352,7 +354,7 @@ class PairFeatureEmbedder(nnx.Module):
                 ),
                 Linear(hidden_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs),
             ]
-        )
+        ) if single_dim is not None else None
 
     def _reference_mass_da(
         self,
@@ -379,7 +381,7 @@ class PairFeatureEmbedder(nnx.Module):
         self,
         peak_mz: Array,
         peak_intensity: Array,
-        single: Array,
+        single: Array | None,
         valid_mask: Array,
         *,
         precursor_mz: Array | None = None,
@@ -453,6 +455,9 @@ class PairFeatureEmbedder(nnx.Module):
                 self.mz_features.embedding(jnp.abs(token_delta)),
             ]
         raw = jnp.concatenate(raw_parts, axis=-1)
+        z = self._raw_proj_call(raw.astype(self.compute_dtype))
+        if self.single_pair_proj is None:
+            return z * pair_mask(valid_mask)[..., None].astype(z.dtype)
         single_i = single[:, :, None, :]
         single_j = single[:, None, :, :]
         num_peaks = single.shape[1]
@@ -465,9 +470,7 @@ class PairFeatureEmbedder(nnx.Module):
             ],
             axis=-1,
         )
-        z = self._raw_proj_call(raw.astype(single.dtype)) + self._single_pair_proj_call(
-            single_pair
-        )
+        z = z + self._single_pair_proj_call(single_pair)
         return z * pair_mask(valid_mask)[..., None].astype(z.dtype)
 
     def load_torch_state_dict(
@@ -907,6 +910,146 @@ class GatedSingleToPairUpdate(nnx.Module):
         self.right.load_torch_state_dict(state_dict, f"{prefix}.right")
         self.out.load_torch_state_dict(state_dict, f"{prefix}.out")
         self.gate.load_torch_state_dict(state_dict, f"{prefix}.gate")
+
+
+def _pair_only_triangle_update(
+    module: TriangleMultiplicativeUpdate, pair: Array, mask: Array,
+    modulation: tuple[Array, Array] | None = None,
+) -> Array:
+    normalized = module.norm_in(pair)
+    if modulation is not None:
+        shift, scale = modulation
+        normalized = normalized * (1 + scale[:, None, None, :]) + shift[:, None, None, :]
+    projected = module.p_in(normalized) * jax.nn.sigmoid(module.g_in(normalized))
+    a, b = jnp.split(projected, 2, axis=-1)
+    valid = mask[..., None].astype(a.dtype)
+    equation = "bikc,bjkc->bijc" if module.direction == "outgoing" else "bkic,bkjc->bijc"
+    update = jnp.einsum(
+        equation, a * valid, b * valid,
+        precision=_dot_precision(a.dtype),
+        preferred_element_type=_preferred_acc_dtype(a.dtype),
+    ).astype(pair.dtype)
+    update = module.p_out(module.norm_out(update))
+    return update * jax.nn.sigmoid(module.g_out(normalized)) * valid
+
+
+class PairOnlyBlock(nnx.Module):
+    """Triangle updates and a pair transition, with no single stream."""
+
+    def __init__(
+        self,
+        *,
+        pair_dim: int,
+        attention_mlp_multiple: float,
+        norm_eps: float,
+        transition_type: str = "swiglu",
+        condition_dim: int | None = None,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.adaLN_modulation = (
+            Linear(condition_dim, 9 * pair_dim, init="zeros",
+                   compute_dtype=compute_dtype, rngs=rngs)
+            if condition_dim is not None else None
+        )
+        self.transition_type = transition_type.lower()
+        if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
+        self.tri_mul_out = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="outgoing",
+            norm_eps=norm_eps,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.tri_mul_out_post_norm = RMSNorm(pair_dim, eps=norm_eps)
+        self.tri_mul_in = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="incoming",
+            norm_eps=norm_eps,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.tri_mul_in_post_norm = RMSNorm(pair_dim, eps=norm_eps)
+        self.pair_transition_norm = RMSNorm(pair_dim, eps=norm_eps)
+        self.pair_transition = _build_pairmixer_transition(
+            pair_dim,
+            hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.pair_transition_post_norm = RMSNorm(pair_dim, eps=norm_eps)
+        if condition_dim is not None:
+            # AdaLN-Zero gates supply the zero residual initialization. Keeping
+            # the output projections zero as well would prevent gate learning.
+            outputs = [self.tri_mul_out.p_out, self.tri_mul_in.p_out]
+            if self.transition_type == "swiglu":
+                outputs.append(self.pair_transition.fc3)
+            for output in outputs:
+                output.weight[...] = rngs.params.normal(
+                    output.weight.shape, dtype=jnp.float32,
+                ) / math.sqrt(output.weight.shape[1])
+
+    def __call__(
+        self,
+        pair: Array,
+        token_mask: Array,
+        condition: Array | None = None,
+    ) -> Array:
+        mask = token_mask[:, :, None] & token_mask[:, None, :]
+        if self.adaLN_modulation is not None:
+            out_shift, out_scale, out_gate, in_shift, in_scale, in_gate, shift, scale, gate = (
+                jnp.split(self.adaLN_modulation(condition), 9, axis=-1)
+            )
+            pair = pair + out_gate[:, None, None, :] * self.tri_mul_out_post_norm(
+                _pair_only_triangle_update(self.tri_mul_out, pair, mask, (out_shift, out_scale))
+            )
+            pair = pair + in_gate[:, None, None, :] * self.tri_mul_in_post_norm(
+                _pair_only_triangle_update(self.tri_mul_in, pair, mask, (in_shift, in_scale))
+            )
+            transition_input = self.pair_transition_norm(pair)
+            transition_input = transition_input * (1 + scale[:, None, None, :]) + shift[:, None, None, :]
+            pair = pair + gate[:, None, None, :] * self.pair_transition_post_norm(
+                _transition_with_preferred_acc(self.pair_transition, transition_input)
+            )
+        else:
+            pair = pair + self.tri_mul_out_post_norm(
+                _pair_only_triangle_update(self.tri_mul_out, pair, mask)
+            )
+            pair = pair + self.tri_mul_in_post_norm(
+                _pair_only_triangle_update(self.tri_mul_in, pair, mask)
+            )
+            pair = pair + self.pair_transition_post_norm(
+                _transition_with_preferred_acc(self.pair_transition, self.pair_transition_norm(pair))
+            )
+        return pair * mask[..., None].astype(pair.dtype)
+
+
+def run_pair_only_blocks(
+    blocks: nnx.List,
+    pair: Array,
+    token_mask: Array,
+    condition: Array | None,
+    *,
+    checkpoint_mode: str,
+    checkpoint_every_n: int,
+) -> Array:
+    for index, block in enumerate(blocks, start=1):
+        call = _call_pair_only_block
+        if checkpoint_mode != "none" and index % checkpoint_every_n == 0:
+            call = nnx.remat(call, policy=activation_checkpoint_policy(checkpoint_mode))
+        pair = call(block, pair, token_mask, condition)
+    return pair
+
+
+def _call_pair_only_block(
+    block: PairOnlyBlock, pair: Array, token_mask: Array, condition: Array | None,
+) -> Array:
+    return block(pair, token_mask, condition)
 
 
 class PairMixerBlock(nnx.Module):

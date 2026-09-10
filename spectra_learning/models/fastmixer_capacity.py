@@ -126,7 +126,7 @@ def pairmixer_fast_required_visible_tokens(
     if mode == "full_visible":
         return pairmixer_fast_full_visible_tokens(config)
     training_mode = str(config.get("training_mode", "jepa")).lower()
-    if training_mode == "mae":
+    if training_mode in {"mae", "pair_distogram"}:
         return pairmixer_fast_mae_visible_tokens(config)
     return pairmixer_fast_full_visible_tokens(config)
 
@@ -158,6 +158,6 @@ def resolve_pairmixer_fast_encoder_max_visible_tokens(
     if mode != "train":
         return pairmixer_fast_required_visible_tokens(config, mode=mode)
     training_mode = str(config.get("training_mode", "jepa")).lower()
-    if training_mode == "mae":
+    if training_mode in {"mae", "pair_distogram"}:
         return pairmixer_fast_mae_encoder_visible_tokens(config)
     return pairmixer_fast_full_visible_tokens(config)

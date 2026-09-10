@@ -152,3 +152,28 @@ def test_architecture_parts_name_token_mz_embedding() -> None:
 
     assert "mztok0.02x77" in parts
     assert "fmlp4x64" in parts
+
+
+def test_jax_parameter_count_uses_abstract_trainable_state(monkeypatch):
+    import pytest
+    jax = pytest.importorskip("jax")
+    from flax import nnx
+    from spectra_learning.models import factory_jax
+    from spectra_learning.training import naming
+
+    class Model(nnx.Module):
+        def __init__(self):
+            self.weight = nnx.Param(jax.numpy.ones((2, 3)))
+            self.b = nnx.Param(jax.numpy.ones((7,)))
+            self.teacher_encoder = nnx.Dict(weight=nnx.Param(jax.numpy.ones((10,))))
+
+    monkeypatch.setattr(factory_jax, "build_model_from_config", lambda config: Model())
+    def torch_build(config):
+        raise AssertionError("JAX naming must not build the torch model")
+    monkeypatch.setattr(naming, "build_model_from_config", torch_build)
+    assert naming._parameter_count({"device_backend": "jax"}) == 6
+
+
+def test_pair_only_architecture_names_pair_width_instead_of_unused_peak_mlp():
+    assert _architecture_parts({"training_mode": "pair_distogram", "model_dim": 2048,
+        "pairmixer_pair_dim": 256, "encoder_fourier_mlp_hidden_dim": 4096}) == ["pairdim256"]

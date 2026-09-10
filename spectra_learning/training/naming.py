@@ -3,12 +3,37 @@ from typing import Any
 from spectra_learning.models.factory import build_model_from_config
 
 
+def _parameter_count(config: Any) -> int:
+    """Count trainable parameters without allocating a JAX model on the host."""
+    if str(config.get("device_backend", "torch")).lower() == "jax":
+        import jax
+        from flax import nnx
+
+        from spectra_learning.models.factory_jax import (
+            build_model_from_config as build_jax_model,
+        )
+
+        from spectra_learning.training.pretrain_jax import trainable_param_filter
+
+        model = nnx.eval_shape(lambda: build_jax_model(config))
+        return sum(
+            int(leaf.size) for leaf in jax.tree.leaves(nnx.state(model, trainable_param_filter))
+        )
+    model = build_model_from_config(config)
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    del model
+    return total
+
+
 def auto_run_name(config: Any) -> str:
     parts = [
         _model_size_part(config),
         f"d{int(config.get('model_dim', 0))}",
         f"L{int(config.get('encoder_num_layers', 0))}",
-        f"h{int(config.get('encoder_num_heads', 0))}",
+        *(
+            [] if config.get("training_mode", "jepa") == "pair_distogram"
+            else [f"h{int(config.get('encoder_num_heads', 0))}"]
+        ),
         f"pred{int(config.get('masked_latent_predictor_num_layers', 0))}",
         f"bs{int(config.get('batch_size', 0))}",
         str(config.get("optimizer", "adamw")).lower(),
@@ -29,15 +54,16 @@ def auto_run_name(config: Any) -> str:
 
 
 def _model_size_part(config: Any) -> str:
-    model = build_model_from_config(config)
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    del model
+    total_params = _parameter_count(config)
     if total_params >= 1_000_000_000:
         return f"{total_params / 1_000_000_000:.1f}B"
     return f"{total_params / 1_000_000:.0f}M"
 
 
 def _architecture_parts(config: Any) -> list[str]:
+    if str(config.get("training_mode", "jepa")).lower() == "pair_distogram":
+        pair_dim = config.get("pairmixer_pair_dim")
+        return [f"pairdim{config['model_dim'] if pair_dim is None else pair_dim}"]
     parts: list[str] = []
     if str(config.get("encoder_mz_embedding", "fourier")).lower() == "token":
         parts.append(
@@ -103,6 +129,16 @@ def _objective_parts(config: Any) -> list[str]:
     if (distogram_loss_weight := float(config.get("distogram_loss_weight", 0.0))) > 0:
         parts.append("disto")
         parts.append(f"distow{distogram_loss_weight:.0e}")
+        if (pair_dim := config.get("distogram_pair_dim", None)) is not None:
+            parts.append(f"distopair{int(pair_dim)}")
+        distogram_multiscale_weight = float(
+            config.get("distogram_multiscale_weight", 0.0)
+        )
+        if config.get("distogram_multiscale_widths", ()) and (
+            distogram_multiscale_weight > 0.0
+        ):
+            parts.append("distomultiscale")
+            parts.append(f"distomultiw{distogram_multiscale_weight:.0e}")
         if not has_mz_bin_part:
             parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
     if (

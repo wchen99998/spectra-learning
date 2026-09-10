@@ -84,6 +84,9 @@ class PeakSetJEPASettings:
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
     distogram_loss_weight: float = 0.0
+    distogram_pair_dim: int | None = None
+    distogram_multiscale_widths: tuple[int, ...] = ()
+    distogram_multiscale_weight: float = 0.0
     latent_pair_loss_weight: float = 0.0
     distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
@@ -197,7 +200,14 @@ def load_frozen_teacher_settings(
     )
 
 
+PAIR_DISTOGRAM_TRAINING_MODE = "pair_distogram"
+
+
 def encoder_uses_pair_path(settings: PeakSetJEPASettings) -> bool:
+    # The pair-branch distogram reads the encoder's pair track, so the pair
+    # path is not optional there whatever the config says.
+    if settings.training_mode.lower() == PAIR_DISTOGRAM_TRAINING_MODE:
+        return True
     if settings.encoder_use_pair_path is not None:
         return settings.encoder_use_pair_path
     return (

@@ -746,7 +746,7 @@ class BlockJEPATests(unittest.TestCase):
             memory_mask,
             context_mask,
             peak_mz,
-        )
+        )["distogram_loss"]
 
         context_latents = model.predictor_final_norm(
             model.encoder_to_predictor_proj(memory)

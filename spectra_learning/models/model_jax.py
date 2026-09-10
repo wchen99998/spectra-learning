@@ -20,14 +20,17 @@ from spectra_learning.models.common_jax import (
     resolve_jax_compute_dtype,
     should_activation_checkpoint,
 )
-from spectra_learning.models.encoder_jax import PeakSetEncoder
+from spectra_learning.models.encoder_jax import PairOnlyEncoder, PeakSetEncoder
 from spectra_learning.models.pairmixer_jax import (
+    PairOnlyBlock,
+    run_pair_only_blocks,
     SUPPORTED_PAIRMIXER_TRANSITION_TYPES,
     _active_indices,
     _gather_single,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.settings import (
+    PAIR_DISTOGRAM_TRAINING_MODE,
     PeakSetJEPASettings,
     encoder_uses_pair_path,
     ema_teacher_momentum_at as resolve_ema_teacher_momentum,
@@ -69,7 +72,9 @@ def build_peak_set_encoder_jax(
     pairmixer_block_type: str,
     pairmixer_fast_encoder_max_visible_tokens: int | None,
     rngs: nnx.Rngs,
-) -> PeakSetEncoder:
+) -> PeakSetEncoder | PairOnlyEncoder:
+    if cfg.training_mode.lower() == PAIR_DISTOGRAM_TRAINING_MODE:
+        return PairOnlyEncoder(cfg, compute_dtype=compute_dtype, rngs=rngs)
     return PeakSetEncoder(
         model_dim=cfg.model_dim,
         embedder=PeakFeatureEmbedder(
@@ -184,6 +189,21 @@ class PeakSetJEPAJax(nnx.Module):
         self.norm_eps = cfg.norm_eps
         self.encoder_metadata_schema = cfg.encoder_metadata_schema
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
+        self.is_pair_distogram = self.training_mode == PAIR_DISTOGRAM_TRAINING_MODE
+        if self.is_pair_distogram:
+            if cfg.masked_token_input_mode != "mz_sentinel":
+                raise ValueError("pair_distogram requires masked_token_input_mode='mz_sentinel'")
+            if cfg.distogram_loss_weight <= 0:
+                raise ValueError("pair_distogram requires distogram_loss_weight > 0")
+            if cfg.mae_loss_weight or cfg.jepa_mae_loss_weight or cfg.masked_token_loss_weight:
+                raise ValueError("pair_distogram requires other loss weights to be zero")
+            if cfg.encoder_metadata_schema and cfg.encoder_metadata_conditioning != "adaln_zero":
+                raise ValueError("pair_distogram metadata requires adaln_zero conditioning")
+        self.encoder_pair_dim = (
+            cfg.model_dim
+            if cfg.pairmixer_pair_dim is None
+            else cfg.pairmixer_pair_dim
+        )
         self.use_frozen_teacher = self.training_mode == "mae_teacher_jepa"
         self.use_ema_teacher = cfg.use_ema_teacher and self.training_mode == "jepa"
         self.ema_teacher_momentum_start = cfg.ema_teacher_momentum_start
@@ -233,6 +253,11 @@ class PeakSetJEPAJax(nnx.Module):
                 "latent pair prediction is unavailable with the cross-attention predictor"
             )
         self.distogram_loss_weight = cfg.distogram_loss_weight
+        self.distogram_pair_dim = cfg.distogram_pair_dim
+        self.distogram_multiscale_widths = tuple(
+            int(width) for width in cfg.distogram_multiscale_widths
+        )
+        self.distogram_multiscale_weight = float(cfg.distogram_multiscale_weight)
         self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
@@ -299,8 +324,12 @@ class PeakSetJEPAJax(nnx.Module):
             if self.teacher_encoder.use_pair_path:
                 for block in self.teacher_encoder.blocks:
                     block.fastmixer_max_visible_tokens = teacher_full_tokens
-        self.latent_mask_token = nnx.Param(
-            rngs.params.normal((self.predictor_dim,), dtype=jnp.float32) * 0.02
+        self.latent_mask_token = (
+            None
+            if self.is_pair_distogram
+            else nnx.Param(
+                rngs.params.normal((self.predictor_dim,), dtype=jnp.float32) * 0.02
+            )
         )
         self.encoder_to_predictor_proj = (
             Linear(
@@ -310,36 +339,65 @@ class PeakSetJEPAJax(nnx.Module):
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
-            if self.predictor_dim != self.model_dim
+            if not self.is_pair_distogram and self.predictor_dim != self.model_dim
             else Identity()
         )
-        predictor_blocks = []
+        predictor_blocks: list[Any] = []
         for _ in range(cfg.masked_latent_predictor_num_layers):
-            block = CrossAttentionBlock(
-                dim=self.predictor_dim,
-                n_heads=cfg.masked_latent_predictor_num_heads,
-                norm_eps=self.norm_eps,
-                hidden_dim=math.ceil(
-                    self.predictor_dim * cfg.predictor_mlp_multiple
-                ),
-                max_sequence_length=(
-                    self.num_peak_tokens + int(self.encoder_use_cls_token)
-                ),
-                compute_dtype=self.compute_dtype,
-                rngs=rngs,
+            block = (
+                PairOnlyBlock(
+                    pair_dim=self.encoder_pair_dim,
+                    attention_mlp_multiple=cfg.predictor_mlp_multiple,
+                    norm_eps=self.norm_eps,
+                    transition_type=self.pairmixer_transition_type,
+                    compute_dtype=self.compute_dtype,
+                    rngs=rngs,
+                )
+                if self.is_pair_distogram
+                else CrossAttentionBlock(
+                    dim=self.predictor_dim,
+                    n_heads=cfg.masked_latent_predictor_num_heads,
+                    norm_eps=self.norm_eps,
+                    hidden_dim=math.ceil(
+                        self.predictor_dim * cfg.predictor_mlp_multiple
+                    ),
+                    max_sequence_length=(
+                        self.num_peak_tokens + int(self.encoder_use_cls_token)
+                    ),
+                    compute_dtype=self.compute_dtype,
+                    rngs=rngs,
+                )
             )
             predictor_blocks.append(block)
         self.masked_latent_predictor = nnx.List(predictor_blocks)
-        self.predictor_final_norm = (
-            RMSNorm(self.predictor_dim, eps=self.norm_eps, affine=False)
-            if cfg.predictor_apply_final_norm
+        # Marks pair entries whose m/z was hidden from the encoder.
+        self.pair_mask_token = (
+            nnx.Param(
+                rngs.params.normal((self.encoder_pair_dim,), dtype=jnp.float32)
+                * 0.02
+            )
+            if self.is_pair_distogram
             else None
         )
-        self.masked_latent_readout = Linear(
-            self.predictor_dim,
-            self.jepa_target_dim,
-            compute_dtype=self.compute_dtype,
-            rngs=rngs,
+        self.predictor_pair_norm = (
+            RMSNorm(self.encoder_pair_dim, eps=self.norm_eps, affine=True)
+            if self.is_pair_distogram and cfg.predictor_apply_final_norm
+            else None
+        )
+        self.predictor_final_norm = (
+            RMSNorm(self.predictor_dim, eps=self.norm_eps, affine=False)
+            if not self.is_pair_distogram and cfg.predictor_apply_final_norm
+            else None
+        )
+        self.masked_latent_readout = (
+            None
+            if self.is_pair_distogram
+            else Linear(
+                self.predictor_dim,
+                self.jepa_target_dim,
+                compute_dtype=self.compute_dtype,
+                rngs=rngs,
+            )
         )
         self.target_projector = (
             TargetProjector(
@@ -348,7 +406,7 @@ class PeakSetJEPAJax(nnx.Module):
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
-            if self.use_target_projector
+            if not self.is_pair_distogram and self.use_target_projector
             else Identity()
         )
         self.teacher_target_projector = (
@@ -362,6 +420,11 @@ class PeakSetJEPAJax(nnx.Module):
             and self.use_target_projector
             else None
         )
+        # A distogram-only run sets mae_loss_weight to 0; without this the m/z
+        # and intensity heads are still built and still run every step.
+        self.uses_mae_value_heads = self.jepa_mae_loss_weight > 0 or (
+            self.training_mode == "mae" and self.mae_loss_weight > 0
+        )
         self.jepa_mae_mz_head = (
             Linear(
                 self.target_projector_dim,
@@ -369,7 +432,7 @@ class PeakSetJEPAJax(nnx.Module):
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
-            if self.jepa_mae_loss_weight > 0 or self.training_mode == "mae"
+            if self.uses_mae_value_heads
             else None
         )
         self.jepa_mae_intensity_head = (
@@ -379,15 +442,32 @@ class PeakSetJEPAJax(nnx.Module):
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
-            if (
-                (self.jepa_mae_loss_weight > 0 or self.training_mode == "mae")
-                and self.mae_intensity_loss_weight > 0.0
+            if self.uses_mae_value_heads and self.mae_intensity_loss_weight > 0.0
+            else None
+        )
+        # The distogram scores every (target, partner) pair, so the tensor the
+        # head reads is [B, targets, partners, dim]. Projecting the predictor
+        # latents down first is what keeps that affordable: at predictor_dim it
+        # is the largest activation in the step.
+        distogram_input_dim = (
+            self.encoder_pair_dim if self.is_pair_distogram else self.predictor_dim
+        )
+        self.distogram_pair_proj = (
+            Linear(
+                distogram_input_dim,
+                self.distogram_pair_dim,
+                bias=False,
+                compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
+            if self.distogram_loss_weight > 0 and self.distogram_pair_dim is not None
             else None
         )
         self.distogram_head = (
             Linear(
-                self.predictor_dim,
+                distogram_input_dim
+                if self.distogram_pair_dim is None
+                else self.distogram_pair_dim,
                 self.distogram_num_bins,
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
@@ -396,7 +476,9 @@ class PeakSetJEPAJax(nnx.Module):
             else None
         )
 
-    def _build_encoder(self, cfg: PeakSetJEPASettings, rngs: nnx.Rngs) -> PeakSetEncoder:
+    def _build_encoder(
+        self, cfg: PeakSetJEPASettings, rngs: nnx.Rngs,
+    ) -> PeakSetEncoder | PairOnlyEncoder:
         return build_peak_set_encoder_jax(
             cfg,
             compute_dtype=self.compute_dtype,
@@ -417,7 +499,7 @@ class PeakSetJEPAJax(nnx.Module):
         self.pairmixer_fast_max_visible_tokens = predictor_tokens
         self.pairmixer_fast_target_max_visible_tokens = target_tokens
         self.encoder.pairmixer_fast_max_visible_tokens = encoder_tokens
-        if self.encoder.use_pair_path:
+        if self.encoder.use_pair_path and not self.is_pair_distogram:
             for block in self.encoder.blocks:
                 block.fastmixer_max_visible_tokens = encoder_tokens
 
@@ -428,6 +510,12 @@ class PeakSetJEPAJax(nnx.Module):
         return_collapse_data: bool = False,
         loss_only: bool = False,
     ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
+        if self.is_pair_distogram:
+            return self.forward_pair_distogram(
+                augmented_batch,
+                return_collapse_data=return_collapse_data,
+                loss_only=loss_only,
+            )
         if self.training_mode == "mae":
             return self.forward_mae(
                 augmented_batch,
@@ -720,7 +808,7 @@ class PeakSetJEPAJax(nnx.Module):
             )
         )
         target_gap_da = None
-        if not loss_only and self.mae_gap_bucket_edges_da:
+        if not loss_only and self.mae_gap_bucket_edges_da and self.uses_mae_value_heads:
             gap = _nearest_context_gap_da(
                 peak_mz,
                 peak_mz,
@@ -728,15 +816,18 @@ class PeakSetJEPAJax(nnx.Module):
                 self.jepa_mae_mz_max,
             )
             target_gap_da = jnp.broadcast_to(gap[:, None, :], target_masks.shape)
-        mae_term, mae_metrics = self._mae_metrics(
-            predictor_output,
-            peak_mz,
-            peak_intensity,
-            target_masks,
-            context_encoded,
-            compute_accuracy=not loss_only,
-            target_gap_da=target_gap_da,
-        )
+        if self.uses_mae_value_heads:
+            mae_term, mae_metrics = self._mae_metrics(
+                predictor_output,
+                peak_mz,
+                peak_intensity,
+                target_masks,
+                context_encoded,
+                compute_accuracy=not loss_only,
+                target_gap_da=target_gap_da,
+            )
+        else:
+            mae_term, mae_metrics = context_encoded.reshape(-1)[0] * 0.0, {}
         distogram_term, distogram_metrics = self._distogram_metrics(
             distogram_loss,
             predictor_output,
@@ -817,7 +908,7 @@ class PeakSetJEPAJax(nnx.Module):
             axis=1,
         )
         target_gap_da = None
-        if not loss_only and self.mae_gap_bucket_edges_da:
+        if not loss_only and self.mae_gap_bucket_edges_da and self.uses_mae_value_heads:
             num_views = target_masks.shape[1]
             flat_context_mask = jnp.broadcast_to(
                 context_mask[:, None, :],
@@ -829,15 +920,18 @@ class PeakSetJEPAJax(nnx.Module):
                 flat_context_mask,
                 self.jepa_mae_mz_max,
             )
-        mae_term, mae_metrics = self._mae_metrics_compact(
-            predictor_output_compact,
-            peak_mz_compact,
-            peak_intensity_compact,
-            target_mask,
-            reference=context_encoded_compact,
-            compute_accuracy=not loss_only,
-            target_gap_da=target_gap_da,
-        )
+        if self.uses_mae_value_heads:
+            mae_term, mae_metrics = self._mae_metrics_compact(
+                predictor_output_compact,
+                peak_mz_compact,
+                peak_intensity_compact,
+                target_mask,
+                reference=context_encoded_compact,
+                compute_accuracy=not loss_only,
+                target_gap_da=target_gap_da,
+            )
+        else:
+            mae_term, mae_metrics = context_encoded_compact.reshape(-1)[0] * 0.0, {}
         distogram_term, distogram_metrics = self._distogram_metrics(
             distogram_loss,
             predictor_output_compact,
@@ -856,6 +950,183 @@ class PeakSetJEPAJax(nnx.Module):
         if return_collapse_data:
             return metrics, {}
         return metrics
+
+    def forward_pair_distogram(
+        self,
+        augmented_batch: dict[str, Array],
+        *,
+        return_collapse_data: bool = False,
+        loss_only: bool = False,
+    ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
+        """Train the encoder's pair track to predict pairwise m/z distances.
+
+        The target peaks reach the encoder with their m/z replaced by the
+        sentinel, so they occupy pair rows and columns but carry no distance in
+        them - `PairFeatureEmbedder` is fed |m/z_i - m/z_j| directly, and
+        without the sentinel this objective would be reading off its own input.
+        Every pair touching a masked peak is then scored against the true
+        distance.
+        """
+        peak_mz = augmented_batch["peak_mz"]
+        peak_intensity = augmented_batch["peak_intensity"]
+        peak_valid_mask = augmented_batch["peak_valid_mask"]
+        precursor_mz = augmented_batch.get("precursor_mz", None)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
+        context_mask = augmented_batch["context_mask"] & peak_valid_mask
+        target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
+        target_union = jnp.any(target_masks, axis=1)
+        encoder_mz, encoder_intensity, encoder_visible_mask = (
+            self._context_encoder_inputs(
+                peak_mz,
+                peak_intensity,
+                context_mask,
+                target_masks,
+            )
+        )
+        pair, idx, compact_token_mask = self.encoder(
+            encoder_mz,
+            encoder_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=encoder_visible_mask,
+            max_visible_tokens=self.pairmixer_fast_encoder_max_visible_tokens,
+            precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
+        )
+        distogram_losses = self._distogram_loss_pair_branch(
+            pair,
+            idx,
+            compact_token_mask,
+            target_union,
+            peak_mz,
+        )
+        loss, distogram_metrics = self._distogram_metrics(distogram_losses, pair)
+        if loss_only:
+            return {"loss": loss}
+        valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
+        metrics = {
+            "loss": loss,
+            "context_fraction": context_mask.astype(jnp.float32).sum()
+            / valid_peak_count,
+        }
+        metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
+        metrics.update(distogram_metrics)
+        if return_collapse_data:
+            return metrics, {}
+        return metrics
+
+    def _distogram_loss_pair_branch(
+        self,
+        pair: Array,
+        idx: Array,
+        compact_token_mask: Array,
+        target_union: Array,
+        peak_mz: Array,
+    ) -> dict[str, Array]:
+        assert self.distogram_head is not None
+        num_cls = int(self.encoder_use_cls_token)
+        slot_is_peak = compact_token_mask & (idx < peak_mz.shape[1])
+        slot_is_target = jnp.take_along_axis(
+            jnp.pad(target_union, ((0, 0), (0, num_cls))), idx, axis=1,
+        ) & slot_is_peak
+        slot_mz = jnp.take_along_axis(
+            jnp.pad(peak_mz, ((0, 0), (0, num_cls))), idx, axis=1,
+        )
+        # Every entry the encoder could only fill from the sentinel: a pair is
+        # unknown as soon as either end of it was masked.
+        unknown_pair = (
+            (slot_is_target[:, :, None] | slot_is_target[:, None, :])
+            & slot_is_peak[:, :, None]
+            & slot_is_peak[:, None, :]
+        )
+        # Keep the encoded intensity/context information for each target.
+        # Its true m/z was already removed before pair embedding.
+        predicted = pair + unknown_pair[..., None].astype(pair.dtype) * (
+            self.pair_mask_token[...].astype(pair.dtype)
+        )
+        predicted = run_pair_only_blocks(
+            self.masked_latent_predictor, predicted, compact_token_mask, None,
+            checkpoint_mode=(
+                self.activation_checkpoint_mode
+                if "predictor" in self.activation_checkpoint_modules else "none"
+            ),
+            checkpoint_every_n=self.activation_checkpoint_every_n_layers,
+        )
+        if self.predictor_pair_norm is not None:
+            predicted = self.predictor_pair_norm(predicted)
+
+        # Score the masked rows only. Every unknown pair touches a masked peak,
+        # so those rows already cover the whole supervised set, and the 2,000-way
+        # head is the most expensive thing in the step: at 32 masked peaks in
+        # 110 slots this is 3,520 pairs rather than 12,100.
+        target_slots, target_slot_mask = _active_indices(
+            slot_is_target,
+            min(
+                pair.shape[1],
+                self.jepa_num_target_blocks * self.pairmixer_fast_target_max_visible_tokens,
+            ),
+        )
+        batch_size, num_tokens, _, pair_dim = predicted.shape
+        rows_pair = _gather_single(
+            predicted.reshape(batch_size, num_tokens, num_tokens * pair_dim),
+            target_slots,
+        ).reshape(batch_size, target_slots.shape[1], num_tokens, pair_dim)
+        row_mz = jnp.take_along_axis(slot_mz, target_slots, axis=1)
+        row_positions = jnp.take_along_axis(idx, target_slots, axis=1)
+        column_positions = idx
+        pair_mask = (
+            target_slot_mask[:, :, None]
+            & slot_is_peak[:, None, :]
+            & (row_positions[:, :, None] != column_positions[:, None, :])
+        )
+        distance = (
+            jnp.abs(row_mz[:, :, None] - slot_mz[:, None, :]) * self.distogram_mz_max
+        )
+        targets = jnp.clip(
+            jnp.floor(distance / self.jepa_mae_mz_bin_size).astype(jnp.int32),
+            0,
+            self.distogram_num_bins - 1,
+        )
+        features = self._distogram_pair_latents(rows_pair)
+        rows = self._distogram_score(features, targets)
+        weights = pair_mask.astype(jnp.float32)
+        denominator = jnp.maximum(weights.sum(), 1.0)
+        return {
+            (
+                "distogram_loss" if width == 1 else f"distogram_ce_{width}bins"
+            ): (row * weights).sum()
+            / denominator
+            for width, row in rows.items()
+        }
+
+    def _distogram_score(self, features: Array, targets: Array) -> dict[int, Array]:
+        widths = (
+            (1, *self.distogram_multiscale_widths)
+            if self._use_distogram_multiscale
+            else (1,)
+        )
+        # These logits are the largest tensor in the step - 2,000 classes on
+        # every pair - so recomputing them in the backward is usually a better
+        # trade than holding them, unlike a per-token head where it is not.
+        score = (
+            nnx.remat(
+                _distogram_score_rows,
+                policy=activation_checkpoint_policy(
+                    self.activation_checkpoint_mode
+                ),
+                static_argnums=(3,),
+            )
+            if should_activation_checkpoint(
+                mode=self.activation_checkpoint_mode,
+                modules=self.activation_checkpoint_modules,
+                module="distogram",
+                block_idx=1,
+                every_n=1,
+            )
+            else _distogram_score_rows
+        )
+        return score(self.distogram_head, features, targets, widths)
 
     def _context_encoder_inputs(
         self,
@@ -1058,7 +1329,7 @@ class PeakSetJEPAJax(nnx.Module):
         context_mask: Array,
         target_masks: Array,
         peak_mz: Array,
-    ) -> tuple[Array, Array, Array | None]:
+    ) -> tuple[Array, Array, dict[str, Array] | None]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         memory_peak_mask = context_mask
         if self.masked_token_input_mode == "mz_sentinel":
@@ -1230,7 +1501,7 @@ class PeakSetJEPAJax(nnx.Module):
         context_mask: Array,
         target_masks: Array,
         peak_mz: Array,
-    ) -> tuple[Array, Array, Array, Array | None]:
+    ) -> tuple[Array, Array, Array, dict[str, Array] | None]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         flat_batch_size = batch_size * num_target_blocks
         compact_encoder_tokens = context_emb_compact.shape[1]
@@ -1318,6 +1589,18 @@ class PeakSetJEPAJax(nnx.Module):
             self.distogram_num_bins - 1,
         )
 
+    @property
+    def _use_distogram_multiscale(self) -> bool:
+        return (
+            bool(self.distogram_multiscale_widths)
+            and self.distogram_multiscale_weight > 0.0
+        )
+
+    def _distogram_pair_latents(self, latents: Array) -> Array:
+        if self.distogram_pair_proj is None:
+            return latents
+        return self.distogram_pair_proj(latents)
+
     def _distogram_loss_compact(
         self,
         target_latents: Array,
@@ -1328,7 +1611,7 @@ class PeakSetJEPAJax(nnx.Module):
         memory_mask: Array,
         context_mask: Array,
         peak_mz: Array,
-    ) -> Array:
+    ) -> dict[str, Array]:
         assert self.distogram_head is not None
         context_latents = self.encoder_to_predictor_proj(memory)
         if self.predictor_final_norm is not None:
@@ -1346,8 +1629,14 @@ class PeakSetJEPAJax(nnx.Module):
             & memory_mask
         )
 
-        partner_latents = jnp.concatenate(
-            [context_latents, target_latents],
+        # Project before the outer difference, not after: the projection is
+        # linear in the token count and the difference is quadratic in it.
+        target_pair_latents = self._distogram_pair_latents(target_latents)
+        partner_pair_latents = jnp.concatenate(
+            [
+                self._distogram_pair_latents(context_latents),
+                target_pair_latents,
+            ],
             axis=1,
         )
         partner_positions = jnp.concatenate(
@@ -1361,9 +1650,8 @@ class PeakSetJEPAJax(nnx.Module):
             & (target_positions[:, :, None] != partner_positions[:, None, :])
         )
         pair_features = jnp.abs(
-            target_latents[:, :, None, :] - partner_latents[:, None, :, :]
+            target_pair_latents[:, :, None, :] - partner_pair_latents[:, None, :, :]
         )
-        logits = self.distogram_head(pair_features)
 
         padded_peak_mz = jnp.pad(
             peak_mz,
@@ -1398,22 +1686,39 @@ class PeakSetJEPAJax(nnx.Module):
             axis=1,
         )
         weights = partner_weights[:, None, :] * pair_mask.astype(jnp.float32)
-        per_pair = _cross_entropy_from_logits(logits, targets)
-        return (per_pair * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+        denominator = jnp.maximum(weights.sum(), 1.0)
+        rows = self._distogram_score(pair_features, targets)
+        losses = {
+            (
+                "distogram_loss"
+                if width == 1
+                else f"distogram_ce_{width}bins"
+            ): (row * weights).sum() / denominator
+            for width, row in rows.items()
+        }
+        return losses
 
     def _distogram_metrics(
         self,
-        distogram_loss: Array | None,
+        distogram_losses: dict[str, Array] | None,
         reference: Array,
     ) -> tuple[Array, dict[str, Array]]:
         if self.distogram_loss_weight <= 0:
             return reference.reshape(-1)[0] * 0.0, {}
-        assert distogram_loss is not None
-        term = distogram_loss * self.distogram_loss_weight
-        return term, {
-            "distogram_loss": distogram_loss,
-            "distogram_term": term,
-        }
+        assert distogram_losses is not None
+        metrics = dict(distogram_losses)
+        objective = metrics["distogram_loss"]
+        coarse = [
+            value for name, value in metrics.items() if name != "distogram_loss"
+        ]
+        if coarse:
+            multiscale = sum(coarse) / float(len(coarse))
+            metrics["distogram_multiscale_loss"] = multiscale
+            objective = objective + self.distogram_multiscale_weight * multiscale
+        term = objective * self.distogram_loss_weight
+        metrics["distogram_objective"] = objective
+        metrics["distogram_term"] = term
+        return term, metrics
 
     @property
     def _use_mz_multiscale(self) -> bool:
@@ -1822,6 +2127,11 @@ class PeakSetJEPAJax(nnx.Module):
                 state_dict,
                 "jepa_mae_intensity_head",
             )
+        if self.distogram_pair_proj is not None:
+            self.distogram_pair_proj.load_torch_state_dict(
+                state_dict,
+                "distogram_pair_proj",
+            )
         if self.distogram_head is not None:
             self.distogram_head.load_torch_state_dict(
                 state_dict,
@@ -1830,6 +2140,62 @@ class PeakSetJEPAJax(nnx.Module):
 
 
 _GAP_SENTINEL_DA = 1.0e6
+
+
+def _distogram_score_rows(
+    head: Linear,
+    pair_features: Array,
+    targets: Array,
+    widths: tuple[int, ...],
+) -> dict[int, Array]:
+    return _grouped_marginal_ce_rows(head(pair_features), targets, widths)
+
+
+def _grouped_marginal_ce_rows(
+    logits: Array,
+    targets: Array,
+    widths: tuple[int, ...],
+) -> dict[int, Array]:
+    """`_coarse_marginal_ce_rows` without materialising every coarse bin.
+
+    The coarse loss only ever reads the group that holds the target, so the
+    other ``num_bins / width - 1`` groups are computed and thrown away:
+
+        -log p_coarse[g(y)] = logsumexp(all logits)
+                              - logsumexp(logits in group g(y))
+
+    Gathering the ``width`` members of that one group costs ``sum(widths)``
+    values per row against ``len(widths) * num_bins``. On the distogram, whose
+    rows are [batch, targets, partners] rather than [batch, targets], that is
+    126 values instead of 12,000 and is the difference between fitting on a
+    v6e chip and not.
+
+    Indices past the last bin are the padding the coarse form adds when
+    ``num_bins`` is not a multiple of ``width``; masking them to -inf leaves
+    the group sum unchanged, so this matches `_coarse_marginal_ce_rows`.
+    """
+    logits = logits.astype(jnp.float32)
+    num_bins = logits.shape[-1]
+    log_partition = logsumexp(logits, axis=-1)
+    rows: dict[int, Array] = {}
+    for width in widths:
+        if width == 1:
+            group = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
+        else:
+            index = (
+                jnp.floor_divide(targets, width) * width
+            )[..., None] + jnp.arange(width)
+            members = jnp.take_along_axis(
+                logits,
+                jnp.minimum(index, num_bins - 1),
+                axis=-1,
+            )
+            group = logsumexp(
+                jnp.where(index < num_bins, members, -jnp.inf),
+                axis=-1,
+            )
+        rows[width] = log_partition - group
+    return rows
 
 
 def _coarse_marginal_ce_rows(

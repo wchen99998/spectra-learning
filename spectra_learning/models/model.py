@@ -30,6 +30,42 @@ def _zero_scalar_like(value: Tensor) -> Tensor:
     return value.reshape(-1)[0] * 0.0
 
 
+def _grouped_marginal_ce_rows(
+    logits: Float[Tensor, "... classes"],
+    targets: Int[Tensor, "..."],
+    widths: tuple[int, ...],
+) -> dict[int, Tensor]:
+    """Coarse-marginal cross entropy scoring only the group holding the target.
+
+        -log p_coarse[g(y)] = logsumexp(all logits)
+                              - logsumexp(logits in group g(y))
+
+    The other groups are computed and discarded by the marginalise-everything
+    form, which on a pairwise head costs a full [..., num_bins] temporary per
+    width. Gathering the ``width`` members of the target's group instead costs
+    ``sum(widths)`` values per row. Indices past the last bin stand in for the
+    -inf padding the group form adds when ``num_bins`` is not a multiple of
+    ``width``, so the two agree exactly.
+    """
+    logits = logits.float()
+    num_bins = logits.shape[-1]
+    log_partition = torch.logsumexp(logits, dim=-1)
+    rows: dict[int, Tensor] = {}
+    for width in widths:
+        if width == 1:
+            group = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        else:
+            start = torch.div(targets, width, rounding_mode="floor") * width
+            index = start.unsqueeze(-1) + torch.arange(width, device=logits.device)
+            members = logits.gather(-1, index.clamp(max=num_bins - 1))
+            group = torch.logsumexp(
+                members.masked_fill(index >= num_bins, float("-inf")),
+                dim=-1,
+            )
+        rows[width] = log_partition - group
+    return rows
+
+
 def _cross_entropy_from_logits(
     logits: Float[Tensor, "... classes"],
     targets: Int[Tensor, "..."],
@@ -162,6 +198,7 @@ class PeakSetJEPA(nn.Module):
     jepa_mae_mz_head: nn.Linear | None
     jepa_mae_intensity_head: nn.Linear | None
     distogram_head: nn.Linear | None
+    distogram_pair_proj: nn.Linear | None
 
     def __init__(
         self,
@@ -266,6 +303,11 @@ class PeakSetJEPA(nn.Module):
             0.0 if self.training_mode == "mae" else cfg.jepa_mae_loss_weight
         )
         self.distogram_loss_weight = cfg.distogram_loss_weight
+        self.distogram_pair_dim = cfg.distogram_pair_dim
+        self.distogram_multiscale_widths = tuple(
+            int(width) for width in cfg.distogram_multiscale_widths
+        )
+        self.distogram_multiscale_weight = float(cfg.distogram_multiscale_weight)
         self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
@@ -504,14 +546,38 @@ class PeakSetJEPA(nn.Module):
     def _build_distogram_head(self) -> None:
         if self.distogram_loss_weight <= 0:
             self.distogram_head = None
+            self.distogram_pair_proj = None
             return
+        if self.distogram_pair_dim is None:
+            self.distogram_pair_proj = None
+        else:
+            # Project before the outer difference: the head reads a
+            # [batch, targets, partners, dim] tensor, so dim is paid for
+            # quadratically in the token count.
+            pair_proj = nn.Linear(
+                self.predictor_dim,
+                self.distogram_pair_dim,
+                bias=False,
+            )
+            nn.init.xavier_normal_(pair_proj.weight)
+            self.distogram_pair_proj = pair_proj
         distogram_head = nn.Linear(
-            self.predictor_dim,
+            self.predictor_dim
+            if self.distogram_pair_dim is None
+            else self.distogram_pair_dim,
             self.distogram_num_bins,
         )
         nn.init.xavier_normal_(distogram_head.weight)
         nn.init.zeros_(distogram_head.bias)
         self.distogram_head = distogram_head
+
+    def _distogram_pair_latents(
+        self,
+        latents: Float[Tensor, "batch tokens dim"],
+    ) -> Float[Tensor, "batch tokens pair_dim"]:
+        if self.distogram_pair_proj is None:
+            return latents
+        return self.distogram_pair_proj(latents)
 
     def ema_teacher_momentum_at(
         self,
@@ -1075,7 +1141,7 @@ class PeakSetJEPA(nn.Module):
     ) -> tuple[
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
-        Float[Tensor, ""] | None,
+        dict[str, Tensor] | None,
     ]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         memory_peak_mask = context_mask
@@ -1215,7 +1281,7 @@ class PeakSetJEPA(nn.Module):
         memory_mask: Bool[Tensor, "batch memory"],
         context_mask: Bool[Tensor, "batch peaks"],
         peak_mz: Float[Tensor, "batch peaks"],
-    ) -> Float[Tensor, ""]:
+    ) -> dict[str, Tensor]:
         context_latents = self.encoder_to_predictor_proj(memory)
         context_latents = self.predictor_final_norm(context_latents)
         padded_context_mask = F.pad(
@@ -1226,7 +1292,11 @@ class PeakSetJEPA(nn.Module):
             torch.gather(padded_context_mask, 1, memory_positions) & memory_mask
         )
 
-        partner_latents = torch.cat([context_latents, target_latents], dim=1)
+        target_pair_latents = self._distogram_pair_latents(target_latents)
+        partner_pair_latents = torch.cat(
+            [self._distogram_pair_latents(context_latents), target_pair_latents],
+            dim=1,
+        )
         partner_positions = torch.cat([memory_positions, target_positions], dim=1)
         partner_mask = torch.cat([context_slot, target_mask], dim=1)
         pair_mask = (
@@ -1236,7 +1306,7 @@ class PeakSetJEPA(nn.Module):
         )
 
         pair_features = (
-            target_latents.unsqueeze(2) - partner_latents.unsqueeze(1)
+            target_pair_latents.unsqueeze(2) - partner_pair_latents.unsqueeze(1)
         ).abs()
         logits = cast(nn.Linear, self.distogram_head)(pair_features)
 
@@ -1261,22 +1331,52 @@ class PeakSetJEPA(nn.Module):
             torch.cat([context_weights, target_weights], dim=1).unsqueeze(1)
             * pair_mask.float()
         )
-        per_pair = _cross_entropy_from_logits(logits, targets)
-        return (per_pair * weights).sum() / weights.sum().clamp_min(1.0)
+        denominator = weights.sum().clamp_min(1.0)
+        widths = (
+            (1, *self.distogram_multiscale_widths)
+            if self._use_distogram_multiscale
+            else (1,)
+        )
+        rows = _grouped_marginal_ce_rows(logits, targets, widths)
+        return {
+            ("distogram_loss" if width == 1 else f"distogram_ce_{width}bins"): (
+                row * weights
+            ).sum()
+            / denominator
+            for width, row in rows.items()
+        }
+
+    @property
+    def _use_distogram_multiscale(self) -> bool:
+        return (
+            bool(self.distogram_multiscale_widths)
+            and self.distogram_multiscale_weight > 0.0
+        )
 
     def _distogram_metrics(
         self,
-        distogram_loss: Float[Tensor, ""] | None,
+        distogram_losses: dict[str, Tensor] | None,
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.distogram_loss_weight <= 0:
             return _zero_scalar_like(reference), {}
-        assert distogram_loss is not None
-        term = distogram_loss.to(dtype=reference.dtype) * self.distogram_loss_weight
-        return term, {
-            "distogram_loss": distogram_loss.to(dtype=reference.dtype),
-            "distogram_term": term,
+        assert distogram_losses is not None
+        metrics = {
+            name: value.to(dtype=reference.dtype)
+            for name, value in distogram_losses.items()
         }
+        objective = metrics["distogram_loss"]
+        coarse = [
+            value for name, value in metrics.items() if name != "distogram_loss"
+        ]
+        if coarse:
+            multiscale = sum(coarse) / float(len(coarse))
+            metrics["distogram_multiscale_loss"] = multiscale
+            objective = objective + self.distogram_multiscale_weight * multiscale
+        term = objective * self.distogram_loss_weight
+        metrics["distogram_objective"] = objective
+        metrics["distogram_term"] = term
+        return term, metrics
 
     def _jepa_mae_metrics(
         self,

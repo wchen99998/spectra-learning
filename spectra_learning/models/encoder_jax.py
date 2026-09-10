@@ -20,6 +20,8 @@ from spectra_learning.models.common_jax import (
 from spectra_learning.models.pairmixer_jax import (
     PairFeatureEmbedder,
     PairMixerBlock,
+    PairOnlyBlock,
+    run_pair_only_blocks,
     SingleMixerBlock,
     _active_indices,
     _gather_single,
@@ -28,10 +30,36 @@ from spectra_learning.models.pairmixer_jax import (
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.spectrum_metadata import MASSIVE_V2_CONDITION_DIM
+from spectra_learning.models.settings import PeakSetJEPASettings
 
 
 def _normal_token_param(rngs: nnx.Rngs, shape: tuple[int, ...]) -> nnx.Param:
     return nnx.Param(rngs.params.normal(shape, dtype=jnp.float32) * 0.02)
+
+
+def _append_cls_pairs(
+    pair: Array, peak_to_cls_token: Array, cls_to_peak_token: Array,
+    cls_cls_token: Array,
+) -> Array:
+    batch_size, num_peaks, _, pair_dim = pair.shape
+    peak_to_cls = jnp.broadcast_to(
+        peak_to_cls_token,
+        (batch_size, num_peaks, 1, pair_dim),
+    )
+    with_cls_column = jnp.concatenate([pair, peak_to_cls.astype(pair.dtype)], axis=2)
+    cls_to_peak = jnp.broadcast_to(
+        cls_to_peak_token,
+        (batch_size, 1, num_peaks, pair_dim),
+    )
+    cls_cls = jnp.broadcast_to(
+        cls_cls_token,
+        (batch_size, 1, 1, pair_dim),
+    )
+    cls_row = jnp.concatenate(
+        [cls_to_peak.astype(pair.dtype), cls_cls.astype(pair.dtype)],
+        axis=2,
+    )
+    return jnp.concatenate([with_cls_column, cls_row], axis=1)
 
 
 class MetadataEmbedder(nnx.Module):
@@ -308,25 +336,10 @@ class PeakSetEncoder(nnx.Module):
     def _append_cls_pair_tokens(self, pair: Array) -> Array:
         if not self.use_cls_token:
             return pair
-        batch_size, num_peaks, _, pair_dim = pair.shape
-        peak_to_cls = jnp.broadcast_to(
-            self.peak_to_cls_pair_token[...],
-            (batch_size, num_peaks, 1, pair_dim),
+        return _append_cls_pairs(
+            pair, self.peak_to_cls_pair_token[...],
+            self.cls_to_peak_pair_token[...], self.cls_cls_pair_token[...],
         )
-        with_cls_column = jnp.concatenate([pair, peak_to_cls.astype(pair.dtype)], axis=2)
-        cls_to_peak = jnp.broadcast_to(
-            self.cls_to_peak_pair_token[...],
-            (batch_size, 1, num_peaks, pair_dim),
-        )
-        cls_cls = jnp.broadcast_to(
-            self.cls_cls_pair_token[...],
-            (batch_size, 1, 1, pair_dim),
-        )
-        cls_row = jnp.concatenate(
-            [cls_to_peak.astype(pair.dtype), cls_cls.astype(pair.dtype)],
-            axis=2,
-        )
-        return jnp.concatenate([with_cls_column, cls_row], axis=1)
 
     def _append_cls_mask(self, peak_mask: Array) -> Array:
         if not self.use_cls_token:
@@ -755,3 +768,116 @@ def _call_fast_pair_mixer_block_compact_only(
         compact_token_mask,
         token_positions,
     )
+
+
+class PairOnlyEncoder(nnx.Module):
+    """Embed compact peak pairs directly and update only the pair representation."""
+
+    def __init__(
+        self, cfg: PeakSetJEPASettings, *, compute_dtype: object, rngs: nnx.Rngs,
+    ) -> None:
+        pair_dim = cfg.model_dim if cfg.pairmixer_pair_dim is None else cfg.pairmixer_pair_dim
+        self.use_cls_token = cfg.encoder_use_cls_token
+        self.peak_to_cls_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
+        self.cls_to_peak_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
+        self.cls_cls_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
+        self.use_pair_path = True
+        self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_encoder_max_visible_tokens
+        self.activation_checkpoint_mode = cfg.activation_checkpoint_mode
+        self.activation_checkpoint_modules = cfg.activation_checkpoint_modules
+        self.activation_checkpoint_every_n_layers = cfg.activation_checkpoint_every_n_layers
+        self.pair_embedder = PairFeatureEmbedder(
+            single_dim=None,
+            pair_dim=pair_dim,
+            hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
+            mz_scale=cfg.pairmixer_mz_scale,
+            precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
+            mz_embedding=cfg.pairmixer_mz_embedding,
+            token_bin_size=cfg.pairmixer_mz_token_bin_size,
+            token_embedding_dim=cfg.pairmixer_mz_token_embedding_dim,
+            fourier_num_freqs=cfg.pairmixer_fourier_num_freqs,
+            fourier_x_min=cfg.pairmixer_fourier_x_min,
+            fourier_x_max=cfg.pairmixer_fourier_x_max,
+            relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
+            relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        condition_dim = (
+            cfg.encoder_metadata_condition_dim if cfg.encoder_metadata_schema else None
+        )
+        self.metadata_embedder = (
+            MetadataEmbedder(condition_dim, compute_dtype=compute_dtype, rngs=rngs)
+            if condition_dim is not None else None
+        )
+        self.blocks = nnx.List([
+            PairOnlyBlock(
+                pair_dim=pair_dim,
+                attention_mlp_multiple=cfg.attention_mlp_multiple,
+                norm_eps=cfg.norm_eps,
+                transition_type=cfg.pairmixer_transition_type,
+                condition_dim=condition_dim,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            ) for _ in range(cfg.encoder_num_layers)
+        ])
+        self.final_pair_norm = (
+            RMSNorm(pair_dim, eps=cfg.norm_eps, affine=True)
+            if cfg.encoder_apply_final_pair_norm else None
+        )
+
+    def __call__(
+        self, peak_mz: Array, peak_intensity: Array, *,
+        valid_mask: Array, visible_mask: Array,
+        max_visible_tokens: int | None = None,
+        precursor_mz: Array | None = None,
+        spectrum_metadata: Array | None = None,
+    ) -> tuple[Array, Array, Array]:
+        token_budget = (
+            self.pairmixer_fast_max_visible_tokens
+            if max_visible_tokens is None else max_visible_tokens
+        )
+        idx, token_mask = _active_indices(
+            valid_mask & visible_mask,
+            None if token_budget is None else token_budget - int(self.use_cls_token),
+        )
+        # Compact before embedding: never allocate a dense N x N pair tensor.
+        mz = jnp.take_along_axis(peak_mz, idx, axis=1)
+        intensity = jnp.take_along_axis(peak_intensity, idx, axis=1)
+        mz = jnp.where(token_mask, mz, 0.0)
+        intensity = jnp.where(token_mask, intensity, 0.0)
+        pair = self.pair_embedder(mz, intensity, None, token_mask, precursor_mz=precursor_mz)
+        if self.use_cls_token:
+            pair = _append_cls_pairs(
+                pair, self.peak_to_cls_pair_token[...],
+                self.cls_to_peak_pair_token[...], self.cls_cls_pair_token[...],
+            )
+            # CLS uses the first position after the physical peaks, matching
+            # the existing encoder convention. It never receives an m/z label.
+            idx = jnp.concatenate([
+                idx, jnp.full((idx.shape[0], 1), peak_mz.shape[1], dtype=idx.dtype),
+            ], axis=1)
+            token_mask = jnp.concatenate([
+                token_mask, jnp.ones((token_mask.shape[0], 1), dtype=jnp.bool_),
+            ], axis=1)
+        condition = (
+            self.metadata_embedder(spectrum_metadata)
+            if self.metadata_embedder is not None else None
+        )
+        pair = run_pair_only_blocks(
+            self.blocks, pair, token_mask, condition,
+            checkpoint_mode=(
+                self.activation_checkpoint_mode
+                if "encoder" in self.activation_checkpoint_modules else "none"
+            ),
+            checkpoint_every_n=self.activation_checkpoint_every_n_layers,
+        )
+        if self.final_pair_norm is not None:
+            pair = self.final_pair_norm(pair)
+        return pair, idx, token_mask
