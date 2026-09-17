@@ -26,6 +26,8 @@ from spectra_learning.models.pairmixer_jax import (
     run_pair_only_blocks,
     SUPPORTED_PAIRMIXER_TRANSITION_TYPES,
     _active_indices,
+    _apply_pair_rope,
+    _gather_pair,
     _gather_single,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
@@ -166,7 +168,9 @@ class PeakSetJEPAJax(nnx.Module):
             "fastmixer-dense",
         }
         self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
-        if self.use_fastmixer and self.pairmixer_fast_max_visible_tokens is None:
+        if self.pairmixer_fast_max_visible_tokens is None and (
+            self.use_fastmixer or self.training_mode == PAIR_DISTOGRAM_TRAINING_MODE
+        ):
             self.pairmixer_fast_max_visible_tokens = cfg.num_peaks + int(
                 cfg.encoder_use_cls_token
             )
@@ -191,8 +195,8 @@ class PeakSetJEPAJax(nnx.Module):
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
         self.is_pair_distogram = self.training_mode == PAIR_DISTOGRAM_TRAINING_MODE
         if self.is_pair_distogram:
-            if cfg.masked_token_input_mode != "mz_sentinel":
-                raise ValueError("pair_distogram requires masked_token_input_mode='mz_sentinel'")
+            if cfg.masked_token_input_mode != "latent_token":
+                raise ValueError("pair_distogram requires masked_token_input_mode='latent_token'")
             if cfg.distogram_loss_weight <= 0:
                 raise ValueError("pair_distogram requires distogram_loss_weight > 0")
             if cfg.mae_loss_weight or cfg.jepa_mae_loss_weight or cfg.masked_token_loss_weight:
@@ -343,13 +347,19 @@ class PeakSetJEPAJax(nnx.Module):
             else Identity()
         )
         predictor_blocks: list[Any] = []
-        for _ in range(cfg.masked_latent_predictor_num_layers):
+        for index in range(cfg.masked_latent_predictor_num_layers):
             block = (
                 PairOnlyBlock(
                     pair_dim=self.encoder_pair_dim,
                     attention_mlp_multiple=cfg.predictor_mlp_multiple,
                     norm_eps=self.norm_eps,
                     transition_type=self.pairmixer_transition_type,
+                    triangle_attention_num_heads=(
+                        cfg.pairmixer_triangle_attention_num_heads
+                        if cfg.pairmixer_triangle_attention_every_n_layers
+                        and (index + 1) % cfg.pairmixer_triangle_attention_every_n_layers == 0
+                        else None
+                    ),
                     compute_dtype=self.compute_dtype,
                     rngs=rngs,
                 )
@@ -958,15 +968,7 @@ class PeakSetJEPAJax(nnx.Module):
         return_collapse_data: bool = False,
         loss_only: bool = False,
     ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
-        """Train the encoder's pair track to predict pairwise m/z distances.
-
-        The target peaks reach the encoder with their m/z replaced by the
-        sentinel, so they occupy pair rows and columns but carry no distance in
-        them - `PairFeatureEmbedder` is fed |m/z_i - m/z_j| directly, and
-        without the sentinel this objective would be reading off its own input.
-        Every pair touching a masked peak is then scored against the true
-        distance.
-        """
+        """Encode context pairs and query missing distances in the predictor."""
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
@@ -977,19 +979,12 @@ class PeakSetJEPAJax(nnx.Module):
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
         target_union = jnp.any(target_masks, axis=1)
-        encoder_mz, encoder_intensity, encoder_visible_mask = (
-            self._context_encoder_inputs(
-                peak_mz,
-                peak_intensity,
-                context_mask,
-                target_masks,
-            )
-        )
+        context_mask = context_mask & ~target_union
         pair, idx, compact_token_mask = self.encoder(
-            encoder_mz,
-            encoder_intensity,
+            peak_mz,
+            peak_intensity,
             valid_mask=peak_valid_mask,
-            visible_mask=encoder_visible_mask,
+            visible_mask=context_mask,
             max_visible_tokens=self.pairmixer_fast_encoder_max_visible_tokens,
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
@@ -1016,6 +1011,55 @@ class PeakSetJEPAJax(nnx.Module):
             return metrics, {}
         return metrics
 
+    def _pair_predictor_inputs(
+        self,
+        pair: Array,
+        idx: Array,
+        compact_token_mask: Array,
+        target_union: Array,
+    ) -> tuple[Array, Array, Array]:
+        """Keep encoded context pairs and seed new pairs with masked queries."""
+        num_cls = int(self.encoder_use_cls_token)
+        batch_idx = jnp.arange(pair.shape[0])[:, None]
+        context = jnp.zeros(
+            (pair.shape[0], self.num_peak_tokens + num_cls), dtype=jnp.bool_,
+        ).at[batch_idx, idx].set(compact_token_mask)
+        predictor_idx, predictor_mask = _active_indices(
+            context[:, :self.num_peak_tokens] | target_union,
+            self.pairmixer_fast_max_visible_tokens - num_cls,
+        )
+        if num_cls:
+            predictor_idx = jnp.concatenate([
+                predictor_idx,
+                jnp.full((pair.shape[0], 1), self.num_peak_tokens, dtype=idx.dtype),
+            ], axis=1)
+            predictor_mask = jnp.concatenate([
+                predictor_mask, jnp.ones((pair.shape[0], 1), dtype=jnp.bool_),
+            ], axis=1)
+
+        # Remap the compact context square directly into predictor order.
+        matches = (
+            (predictor_idx[:, :, None] == idx[:, None, :])
+            & compact_token_mask[:, None, :]
+        )
+        encoder_slots = jnp.argmax(matches, axis=-1)
+        encoded = _gather_pair(pair, encoder_slots)
+        is_context = jnp.any(matches, axis=-1)
+        context_pair = is_context[:, :, None] & is_context[:, None, :]
+        # Use the encoder's 2D input rotary convention for masked queries:
+        # rotate each channel half by its endpoint's original position, with
+        # no target m/z or intensity features.
+        num_tokens = predictor_idx.shape[1]
+        query = jnp.broadcast_to(
+            self.pair_mask_token[...].astype(pair.dtype),
+            (pair.shape[0], num_tokens, num_tokens, self.encoder_pair_dim),
+        )
+        masked_pair = _apply_pair_rope(query, predictor_idx)
+        predicted = jnp.where(context_pair[..., None], encoded, masked_pair)
+        valid_pair = predictor_mask[:, :, None] & predictor_mask[:, None, :]
+        predicted = predicted * valid_pair[..., None].astype(pair.dtype)
+        return predicted, predictor_idx, predictor_mask
+
     def _distogram_loss_pair_branch(
         self,
         pair: Array,
@@ -1025,6 +1069,9 @@ class PeakSetJEPAJax(nnx.Module):
         peak_mz: Array,
     ) -> dict[str, Array]:
         assert self.distogram_head is not None
+        predicted, idx, compact_token_mask = self._pair_predictor_inputs(
+            pair, idx, compact_token_mask, target_union,
+        )
         num_cls = int(self.encoder_use_cls_token)
         slot_is_peak = compact_token_mask & (idx < peak_mz.shape[1])
         slot_is_target = jnp.take_along_axis(
@@ -1032,18 +1079,6 @@ class PeakSetJEPAJax(nnx.Module):
         ) & slot_is_peak
         slot_mz = jnp.take_along_axis(
             jnp.pad(peak_mz, ((0, 0), (0, num_cls))), idx, axis=1,
-        )
-        # Every entry the encoder could only fill from the sentinel: a pair is
-        # unknown as soon as either end of it was masked.
-        unknown_pair = (
-            (slot_is_target[:, :, None] | slot_is_target[:, None, :])
-            & slot_is_peak[:, :, None]
-            & slot_is_peak[:, None, :]
-        )
-        # Keep the encoded intensity/context information for each target.
-        # Its true m/z was already removed before pair embedding.
-        predicted = pair + unknown_pair[..., None].astype(pair.dtype) * (
-            self.pair_mask_token[...].astype(pair.dtype)
         )
         predicted = run_pair_only_blocks(
             self.masked_latent_predictor, predicted, compact_token_mask, None,
@@ -1063,7 +1098,7 @@ class PeakSetJEPAJax(nnx.Module):
         target_slots, target_slot_mask = _active_indices(
             slot_is_target,
             min(
-                pair.shape[1],
+                predicted.shape[1],
                 self.jepa_num_target_blocks * self.pairmixer_fast_target_max_visible_tokens,
             ),
         )

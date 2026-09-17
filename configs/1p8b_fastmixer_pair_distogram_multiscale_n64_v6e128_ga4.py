@@ -3,13 +3,15 @@
 Global batch 2,048 = 4 samples/chip/microstep x 128 chips x 4 microsteps.
 
 Only pair tensors pass through 15 encoder and 5 predictor blocks at width
-2,048. Raw pair features retain intensity and precursor information; target
-m/z is replaced by a sentinel before embedding. Metadata uses AdaLN-Zero.
+2,048. Context pair features retain intensity and precursor information; masked
+peaks enter only as predictor queries. Encoder pair inputs and predictor
+queries use 2D rotary position encoding. Metadata uses AdaLN-Zero.
 A 2,000-bin distance head uses 0.5 Da bins and multi-scale CE.
 
 The token budget is 63 peaks plus one CLS position, represented only in the
 pair stream. Per-block recomputation and replicated bf16 Adam avoid ZeRO-1.
-AOT compilation estimates 30.68 GiB/chip, with 0.56 GiB reserved-budget headroom.
+The previous sentinel-input architecture's AOT compilation estimated
+30.68 GiB/chip, with 0.56 GiB reserved-budget headroom.
 This is compiler buffer sizing, not a runtime throughput or stability benchmark.
 See docs/benchmarks/paironly_v6e_ga4.md for results and reproduction commands.
 
@@ -36,7 +38,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_peaks = 63
     cfg.encoder_use_cls_token = True
     cfg.encoder_apply_final_pair_norm = True
-    cfg.masked_token_input_mode = "mz_sentinel"
+    cfg.masked_token_input_mode = "latent_token"
     cfg.mae_loss_weight = 0.0
     cfg.mae_mz_multiscale_widths = ()
     cfg.mae_mz_multiscale_weight = 0.0

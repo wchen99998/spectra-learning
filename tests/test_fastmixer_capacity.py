@@ -295,3 +295,14 @@ def test_jax_msg_probe_uses_full_visible_fastmixer_clone():
     )
 
     assert single.shape == (1, 5, 4)
+
+
+def test_pair_distogram_predictor_capacity_includes_all_target_views():
+    cfg = load_config("configs/1p8b_fastmixer_pair_distogram_multiscale_n64_v6e128_ga4.py")
+    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.2
+    assert pairmixer_fast_stage_capacities(cfg) == ((33, 59, 13),)
+    settings = PeakSetJEPASettings.from_config(cfg)
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 33
+    assert settings.pairmixer_fast_max_visible_tokens == 59

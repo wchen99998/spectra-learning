@@ -55,6 +55,7 @@ def _mae_fast_capacities(
         config.get("masked_token_input_mode", "latent_token")
     ).lower()
     num_cls_tokens = _num_cls_tokens(config)
+    pair_distogram = str(config.get("training_mode", "jepa")).lower() == "pair_distogram"
 
     encoder_max_visible = 1
     predictor_max_visible = 1
@@ -69,13 +70,14 @@ def _mae_fast_capacities(
             allow_target_overlap=allow_target_overlap,
         )
         encoder_visible = context_len + num_cls_tokens
-        if masked_token_input_mode == "mz_sentinel":
-            target_union_len = min(
-                max(valid_count - context_len, 0),
-                num_target_blocks * target_len,
-            )
+        target_union_len = min(
+            max(valid_count - context_len, 0),
+            num_target_blocks * target_len,
+        )
+        if masked_token_input_mode == "mz_sentinel" and not pair_distogram:
             encoder_visible = context_len + target_union_len + num_cls_tokens
-        predictor_visible = context_len + target_len + num_cls_tokens
+        predictor_targets = target_union_len if pair_distogram else target_len
+        predictor_visible = context_len + predictor_targets + num_cls_tokens
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
         target_max_visible = max(target_max_visible, target_len)

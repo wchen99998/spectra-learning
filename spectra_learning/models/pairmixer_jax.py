@@ -50,6 +50,14 @@ def _apply_rope(tensor: Array, positions: Array) -> Array:
     )
 
 
+def _apply_pair_rope(pair: Array, positions: Array) -> Array:
+    """Rotate the two channel halves by the original row/column positions."""
+    row, column = jnp.split(pair, 2, axis=-1)
+    row = jnp.swapaxes(_apply_rope(jnp.swapaxes(row, 1, 2), positions), 1, 2)
+    column = _apply_rope(column, positions)
+    return jnp.concatenate((row, column), axis=-1)
+
+
 def rope_interleaved_to_half_permutation(head_dim: int) -> np.ndarray:
     """Row order that makes rotate-half RoPE equal the old interleaved RoPE.
 
@@ -912,10 +920,78 @@ class GatedSingleToPairUpdate(nnx.Module):
         self.gate.load_torch_state_dict(state_dict, f"{prefix}.gate")
 
 
+class TriangleAttention(nnx.Module):
+    """Gated starting/ending-node attention on a compact pair square."""
+
+    def __init__(
+        self, pair_dim: int, *, num_heads: int, ending: bool,
+        norm_eps: float, compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        if num_heads <= 0 or pair_dim % num_heads:
+            raise ValueError("triangle attention heads must be positive and divide pair width")
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.num_heads = num_heads
+        self.head_dim = pair_dim // num_heads
+        self.ending = ending
+        self.norm = RMSNorm(pair_dim, eps=norm_eps)
+        self.q_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
+        self.k_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
+        self.qkv = Linear(pair_dim, 3 * pair_dim, bias=False,
+                          compute_dtype=compute_dtype, rngs=rngs)
+        self.bias = Linear(pair_dim, num_heads, bias=False,
+                           compute_dtype=compute_dtype, rngs=rngs)
+        self.g = Linear(pair_dim, pair_dim, init="gate",
+                        compute_dtype=compute_dtype, rngs=rngs)
+        self.o = Linear(pair_dim, pair_dim, init="zeros",
+                        compute_dtype=compute_dtype, rngs=rngs)
+
+    def __call__(
+        self, pair: Array, mask: Array,
+        modulation: tuple[Array, Array] | None = None,
+    ) -> Array:
+        if self.ending:
+            pair = jnp.swapaxes(pair, 1, 2)
+            mask = jnp.swapaxes(mask, 1, 2)
+        normalized = self.norm(pair)
+        if modulation is not None:
+            shift, scale = modulation
+            normalized = normalized * (1 + scale[:, None, None, :]) + shift[:, None, None, :]
+        batch_size, num_tokens, _, pair_dim = pair.shape
+        qkv = _linear_with_preferred_acc(self.qkv, normalized).reshape(
+            batch_size, num_tokens, num_tokens, 3, self.num_heads, self.head_dim,
+        )
+        q, k, v = jnp.moveaxis(qkv, 3, 0)
+        q = self.q_norm(jnp.swapaxes(q, 2, 3))
+        k = self.k_norm(jnp.swapaxes(k, 2, 3))
+        v = jnp.swapaxes(v, 2, 3)
+        # The third edge (j, k) biases attention from (i, j) to (i, k).
+        # Share this B x H x N x N bias across anchors i using vmap, without
+        # expanding feature tensors to B x N x N x N x D or flattening N^2
+        # pairs into an attention sequence with N^4 scores.
+        bias = jnp.transpose(_linear_with_preferred_acc(self.bias, normalized), (0, 3, 1, 2))
+        key_mask = jnp.any(mask, axis=1)[:, None, None, :]
+        bias = jnp.where(key_mask, bias.astype(jnp.float32), jnp.finfo(jnp.float32).min)
+        out = jax.vmap(
+            lambda query, key, value: scaled_dot_product_attention(
+                query, key, value, attn_mask=bias,
+            ),
+            in_axes=1, out_axes=1,
+        )(q, k, v)
+        out = jnp.swapaxes(out, 2, 3).reshape(pair.shape)
+        out = out * jax.nn.sigmoid(_linear_with_preferred_acc(self.g, normalized))
+        out = _linear_with_preferred_acc(self.o, out)
+        # A finite masked softmax also keeps empty spectra's gradients finite.
+        out = out * mask[..., None].astype(out.dtype)
+        return jnp.swapaxes(out, 1, 2) if self.ending else out
+
+
 def _pair_only_triangle_update(
-    module: TriangleMultiplicativeUpdate, pair: Array, mask: Array,
+    module: TriangleMultiplicativeUpdate | TriangleAttention, pair: Array, mask: Array,
     modulation: tuple[Array, Array] | None = None,
 ) -> Array:
+    if isinstance(module, TriangleAttention):
+        return module(pair, mask, modulation)
     normalized = module.norm_in(pair)
     if modulation is not None:
         shift, scale = modulation
@@ -944,6 +1020,7 @@ class PairOnlyBlock(nnx.Module):
         norm_eps: float,
         transition_type: str = "swiglu",
         condition_dim: int | None = None,
+        triangle_attention_num_heads: int | None = None,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -958,21 +1035,27 @@ class PairOnlyBlock(nnx.Module):
             raise ValueError(
                 "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
             )
-        self.tri_mul_out = TriangleMultiplicativeUpdate(
-            pair_dim,
-            direction="outgoing",
-            norm_eps=norm_eps,
-            compute_dtype=compute_dtype,
-            rngs=rngs,
-        )
+        self.use_triangle_attention = triangle_attention_num_heads is not None
+        if triangle_attention_num_heads is not None:
+            self.tri_attn_start = TriangleAttention(
+                pair_dim, num_heads=triangle_attention_num_heads, ending=False,
+                norm_eps=norm_eps, compute_dtype=compute_dtype, rngs=rngs,
+            )
+            self.tri_attn_end = TriangleAttention(
+                pair_dim, num_heads=triangle_attention_num_heads, ending=True,
+                norm_eps=norm_eps, compute_dtype=compute_dtype, rngs=rngs,
+            )
+        else:
+            self.tri_mul_out = TriangleMultiplicativeUpdate(
+                pair_dim, direction="outgoing", norm_eps=norm_eps,
+                compute_dtype=compute_dtype, rngs=rngs,
+            )
+            self.tri_mul_in = TriangleMultiplicativeUpdate(
+                pair_dim, direction="incoming", norm_eps=norm_eps,
+                compute_dtype=compute_dtype, rngs=rngs,
+            )
+        # Retain normalization parameter paths for existing multiplication runs.
         self.tri_mul_out_post_norm = RMSNorm(pair_dim, eps=norm_eps)
-        self.tri_mul_in = TriangleMultiplicativeUpdate(
-            pair_dim,
-            direction="incoming",
-            norm_eps=norm_eps,
-            compute_dtype=compute_dtype,
-            rngs=rngs,
-        )
         self.tri_mul_in_post_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.pair_transition_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.pair_transition = _build_pairmixer_transition(
@@ -986,13 +1069,25 @@ class PairOnlyBlock(nnx.Module):
         if condition_dim is not None:
             # AdaLN-Zero gates supply the zero residual initialization. Keeping
             # the output projections zero as well would prevent gate learning.
-            outputs = [self.tri_mul_out.p_out, self.tri_mul_in.p_out]
+            outputs = (
+                [self.tri_attn_start.o, self.tri_attn_end.o]
+                if self.use_triangle_attention
+                else [self.tri_mul_out.p_out, self.tri_mul_in.p_out]
+            )
             if self.transition_type == "swiglu":
                 outputs.append(self.pair_transition.fc3)
             for output in outputs:
                 output.weight[...] = rngs.params.normal(
                     output.weight.shape, dtype=jnp.float32,
                 ) / math.sqrt(output.weight.shape[1])
+
+    @property
+    def triangle_out(self) -> TriangleMultiplicativeUpdate | TriangleAttention:
+        return self.tri_attn_start if self.use_triangle_attention else self.tri_mul_out
+
+    @property
+    def triangle_in(self) -> TriangleMultiplicativeUpdate | TriangleAttention:
+        return self.tri_attn_end if self.use_triangle_attention else self.tri_mul_in
 
     def __call__(
         self,
@@ -1006,10 +1101,10 @@ class PairOnlyBlock(nnx.Module):
                 jnp.split(self.adaLN_modulation(condition), 9, axis=-1)
             )
             pair = pair + out_gate[:, None, None, :] * self.tri_mul_out_post_norm(
-                _pair_only_triangle_update(self.tri_mul_out, pair, mask, (out_shift, out_scale))
+                _pair_only_triangle_update(self.triangle_out, pair, mask, (out_shift, out_scale))
             )
             pair = pair + in_gate[:, None, None, :] * self.tri_mul_in_post_norm(
-                _pair_only_triangle_update(self.tri_mul_in, pair, mask, (in_shift, in_scale))
+                _pair_only_triangle_update(self.triangle_in, pair, mask, (in_shift, in_scale))
             )
             transition_input = self.pair_transition_norm(pair)
             transition_input = transition_input * (1 + scale[:, None, None, :]) + shift[:, None, None, :]
@@ -1018,10 +1113,10 @@ class PairOnlyBlock(nnx.Module):
             )
         else:
             pair = pair + self.tri_mul_out_post_norm(
-                _pair_only_triangle_update(self.tri_mul_out, pair, mask)
+                _pair_only_triangle_update(self.triangle_out, pair, mask)
             )
             pair = pair + self.tri_mul_in_post_norm(
-                _pair_only_triangle_update(self.tri_mul_in, pair, mask)
+                _pair_only_triangle_update(self.triangle_in, pair, mask)
             )
             pair = pair + self.pair_transition_post_norm(
                 _transition_with_preferred_acc(self.pair_transition, self.pair_transition_norm(pair))

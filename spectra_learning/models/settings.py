@@ -115,6 +115,9 @@ class PeakSetJEPASettings:
     encoder_apply_final_pair_norm: bool = False
     pairmixer_block_type: str = "dense"
     pairmixer_transition_type: str = "swiglu"
+    # Zero keeps all multiplication blocks; 2 alternates multiplication/attention.
+    pairmixer_triangle_attention_every_n_layers: int = 0
+    pairmixer_triangle_attention_num_heads: int = 8
     pairmixer_pair_dim: int | None = None
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0

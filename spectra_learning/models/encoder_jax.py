@@ -24,6 +24,7 @@ from spectra_learning.models.pairmixer_jax import (
     run_pair_only_blocks,
     SingleMixerBlock,
     _active_indices,
+    _apply_pair_rope,
     _gather_single,
     _gather_pair,
     _scatter_pair,
@@ -777,6 +778,10 @@ class PairOnlyEncoder(nnx.Module):
         self, cfg: PeakSetJEPASettings, *, compute_dtype: object, rngs: nnx.Rngs,
     ) -> None:
         pair_dim = cfg.model_dim if cfg.pairmixer_pair_dim is None else cfg.pairmixer_pair_dim
+        if pair_dim % 4:
+            raise ValueError("pair-only encoder requires pair width divisible by 4 for 2D RoPE")
+        if cfg.pairmixer_triangle_attention_every_n_layers < 0:
+            raise ValueError("pairmixer_triangle_attention_every_n_layers must be nonnegative")
         self.use_cls_token = cfg.encoder_use_cls_token
         self.peak_to_cls_pair_token = (
             _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
@@ -823,9 +828,15 @@ class PairOnlyEncoder(nnx.Module):
                 norm_eps=cfg.norm_eps,
                 transition_type=cfg.pairmixer_transition_type,
                 condition_dim=condition_dim,
+                triangle_attention_num_heads=(
+                    cfg.pairmixer_triangle_attention_num_heads
+                    if cfg.pairmixer_triangle_attention_every_n_layers
+                    and (index + 1) % cfg.pairmixer_triangle_attention_every_n_layers == 0
+                    else None
+                ),
                 compute_dtype=compute_dtype,
                 rngs=rngs,
-            ) for _ in range(cfg.encoder_num_layers)
+            ) for index in range(cfg.encoder_num_layers)
         ])
         self.final_pair_norm = (
             RMSNorm(pair_dim, eps=cfg.norm_eps, affine=True)
@@ -866,6 +877,11 @@ class PairOnlyEncoder(nnx.Module):
             token_mask = jnp.concatenate([
                 token_mask, jnp.ones((token_mask.shape[0], 1), dtype=jnp.bool_),
             ], axis=1)
+        # Preserve original peak positions across compaction, including CLS.
+        # Rotate embedded pair features once, before the first triangle block.
+        pair = _apply_pair_rope(pair, idx)
+        valid_pair = token_mask[:, :, None] & token_mask[:, None, :]
+        pair = pair * valid_pair[..., None].astype(pair.dtype)
         condition = (
             self.metadata_embedder(spectrum_metadata)
             if self.metadata_embedder is not None else None

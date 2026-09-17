@@ -3,12 +3,14 @@
 Keeps the 15 encoder and five predictor blocks of the 1.8B pair-only run,
 with pair width reduced to 1,536. Global batch 2,048 at GA4 gives four
 spectra per chip per microstep. Replicated bf16 Adam moments avoid ZeRO-1.
-Selective recomputation measured 0.859 s/update on four v6e chips with the
-same per-chip batch shape; 128-chip compilation estimates 27.48 GiB/chip.
+For the previous sentinel-input architecture, selective recomputation measured
+0.859 s/update on four v6e chips with the same per-chip batch shape; 128-chip
+compilation estimated 27.48 GiB/chip.
 See docs/benchmarks/paironly1b_n48_v6e128_ga4.md for measurement limits.
 
 The parent supplies metadata AdaLN-Zero, multiscale distogram supervision,
-sentinel-masked target m/z, the current data mixing, and a 72-hour limit.
+context-only encoding and masked predictor queries, the current data mixing,
+and a 72-hour limit.
 """
 
 from importlib import import_module

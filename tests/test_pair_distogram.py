@@ -47,7 +47,7 @@ def _model(**overrides) -> PeakSetJEPAJax:
         pairmixer_block_type="fastmixer",
         masked_latent_predictor_num_layers=2,
         masked_latent_predictor_num_heads=2,
-        masked_token_input_mode="mz_sentinel",
+        masked_token_input_mode="latent_token",
         num_peaks=8,
         encoder_use_cls_token=False,
         jepa_num_target_blocks=1,
@@ -114,6 +114,12 @@ def test_encoder_and_predictor_have_no_single_stream():
     assert model.masked_latent_readout is None
 
 
+def test_pair_queries_default_to_full_capacity_without_fastmixer():
+    model = _model(pairmixer_block_type="dense")
+    assert model.pairmixer_fast_max_visible_tokens == 8
+    assert np.isfinite(float(model(_batch(batch=1))["loss"]))
+
+
 def test_no_mae_value_heads_when_the_distogram_is_the_only_loss():
     model = _model()
 
@@ -154,46 +160,146 @@ def test_forward_emits_one_distogram_term_per_scale_and_nothing_else():
         previous = current
 
 
-def test_the_encoder_pair_representation_cannot_see_the_masked_distances():
-    """The sentinel is what stops the head reading off its own input.
+@pytest.mark.parametrize("use_cls", [False, True])
+def test_masked_values_never_reach_encoder_or_predictor(monkeypatch, use_cls):
+    from spectra_learning.models.encoder_jax import PairOnlyEncoder
 
-    `PairFeatureEmbedder` is fed |m/z_i - m/z_j| directly, so if the masked
-    peaks reached the encoder with their real m/z the objective would be a
-    lookup. Move them and the encoder's pair tensor must not move at all.
-    """
-    model = _model()
-    batch = _batch()
+    model = _model(encoder_use_cls_token=use_cls)
+    _nudge_zero_initialised_branches(model)
+    batch = _batch(batch=1)
+    batch["context_mask"] = jnp.array([[True, False, True, False, True, False, False, False]])
+    batch["target_masks"] = jnp.array([[[False, True, False, True, False, False, False, False]]])
     target_union = jnp.any(batch["target_masks"], axis=1)
+    captured = {}
+    encode = PairOnlyEncoder.__call__
+    score = model._distogram_score
 
-    def encoder_pair(peak_mz):
-        moved = dict(batch, peak_mz=peak_mz)
-        encoder_mz, encoder_intensity, visible = model._context_encoder_inputs(
-            moved["peak_mz"],
-            moved["peak_intensity"],
-            moved["context_mask"] & moved["peak_valid_mask"],
-            moved["target_masks"] & moved["peak_valid_mask"][:, None, :],
-        )
-        pair, _idx, _mask = model.encoder(
-            encoder_mz,
-            encoder_intensity,
-            valid_mask=moved["peak_valid_mask"],
-            visible_mask=visible,
-            max_visible_tokens=model.pairmixer_fast_encoder_max_visible_tokens,
-            precursor_mz=moved["precursor_mz"],
-        )
-        return pair
+    def capture_encoder(encoder, *args, **kwargs):
+        np.testing.assert_array_equal(kwargs["visible_mask"], batch["context_mask"])
+        pair, idx, mask = encode(encoder, *args, **kwargs)
+        visible_peaks = np.asarray(idx)[np.asarray(mask)]
+        assert not set(visible_peaks) & {1, 3}
+        captured["pair"] = np.asarray(pair)
+        return pair, idx, mask
 
-    shifted = jnp.where(target_union, batch["peak_mz"] + 0.37, batch["peak_mz"])
-    assert int(jnp.sum(shifted != batch["peak_mz"])) > 0
+    def capture_score(features, targets):
+        captured["features"] = np.asarray(features)
+        captured["targets"] = np.asarray(targets)
+        return score(features, targets)
 
-    before = np.asarray(encoder_pair(batch["peak_mz"]))
-    after = np.asarray(encoder_pair(shifted))
-    np.testing.assert_array_equal(before, after)
-
-    # ... while the labels the head is scored against do move.
-    assert float(model(dict(batch, peak_mz=shifted))["loss"]) != float(
-        model(batch)["loss"]
+    monkeypatch.setattr(PairOnlyEncoder, "__call__", capture_encoder)
+    model._distogram_score = capture_score
+    loss = float(model(batch)["loss"])
+    before = dict(captured)
+    moved = dict(batch,
+        peak_mz=jnp.where(target_union, batch["peak_mz"] + 0.37, batch["peak_mz"]),
+        peak_intensity=jnp.where(target_union, 100.0, batch["peak_intensity"]),
     )
+    moved_loss = float(model(moved)["loss"])
+    np.testing.assert_array_equal(before["pair"], captured["pair"])
+    np.testing.assert_array_equal(before["features"], captured["features"])
+    assert np.any(before["targets"] != captured["targets"])
+    assert moved_loss != loss
+    # Intensities of targets are not labels either, so changing only those
+    # leaves the entire objective unchanged.
+    assert float(model(dict(batch, peak_intensity=moved["peak_intensity"]))["loss"]) == loss
+
+
+def _rotate_endpoint(vector: np.ndarray, position: int) -> np.ndarray:
+    """Independent NumPy reference for one endpoint's rotary encoding."""
+    half = len(vector) // 2
+    angles = position / (10_000.0 ** (np.arange(0, len(vector), 2) / len(vector)))
+    first, second = vector[:half], vector[half:]
+    return np.concatenate((
+        first * np.cos(angles) - second * np.sin(angles),
+        second * np.cos(angles) + first * np.sin(angles),
+    ))
+
+
+@pytest.mark.parametrize("use_cls", [False, True])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_encoder_rotates_pair_inputs_at_original_positions(use_cls, dtype):
+    # With no blocks/final norm, the encoder exposes exactly its input to
+    # the triangle stack. Ragged, noncontiguous contexts distinguish original
+    # positions from compact slots and exercise padded CLS interactions.
+    model = _model(
+        encoder_num_layers=0, encoder_apply_final_pair_norm=False,
+        encoder_use_cls_token=use_cls, autocast_dtype=dtype,
+        pairmixer_fast_encoder_max_visible_tokens=4 + int(use_cls),
+    )
+    batch = _batch(batch=2)
+    visible = jnp.array([
+        [True, False, False, True, False, False, True, False],
+        [False, False, True, False, False, True, False, False],
+    ])
+    pair, positions, mask = model.encoder(
+        batch["peak_mz"], batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"], visible_mask=visible,
+        precursor_mz=batch["precursor_mz"],
+    )
+    peak_positions, peak_mask = positions[:, :4], mask[:, :4]
+    raw = model.encoder.pair_embedder(
+        jnp.where(peak_mask, jnp.take_along_axis(batch["peak_mz"], peak_positions, axis=1), 0),
+        jnp.where(peak_mask, jnp.take_along_axis(batch["peak_intensity"], peak_positions, axis=1), 0),
+        None, peak_mask, precursor_mz=batch["precursor_mz"],
+    )
+    assert pair.dtype == (jnp.bfloat16 if dtype == "bfloat16" else jnp.float32)
+    actual = np.asarray(pair, dtype=np.float32)
+    tolerance = 0.02 if dtype == "bfloat16" else 1e-6
+    for b in range(2):
+        for i in range(pair.shape[1]):
+            for j in range(pair.shape[2]):
+                if not (mask[b, i] and mask[b, j]):
+                    np.testing.assert_array_equal(actual[b, i, j], 0)
+                    continue
+                if use_cls and i == 4 and j == 4:
+                    value = model.encoder.cls_cls_pair_token[...]
+                elif use_cls and i == 4:
+                    value = model.encoder.cls_to_peak_pair_token[...]
+                elif use_cls and j == 4:
+                    value = model.encoder.peak_to_cls_pair_token[...]
+                else:
+                    value = raw[b, i, j]
+                value = np.asarray(value, dtype=np.float32)
+                expected = np.concatenate((
+                    _rotate_endpoint(value[:4], int(positions[b, i])),
+                    _rotate_endpoint(value[4:], int(positions[b, j])),
+                ))
+                np.testing.assert_allclose(actual[b, i, j], expected, atol=tolerance, rtol=tolerance)
+                np.testing.assert_allclose(
+                    np.linalg.norm(actual[b, i, j]), np.linalg.norm(value),
+                    atol=tolerance, rtol=tolerance,
+                )
+
+
+def test_predictor_preserves_context_pairs_and_uses_2d_rotary_queries():
+    model = _model(encoder_use_cls_token=True, pairmixer_fast_max_visible_tokens=7)
+    # Deliberately noncontiguous positions, plus padding before CLS.
+    idx = jnp.array([[0, 3, 1, 8]])
+    mask = jnp.array([[True, True, False, True]])
+    pair = jnp.arange(4 * 4 * 8, dtype=jnp.float32).reshape(1, 4, 4, 8)
+    targets = jnp.array([[False, True, False, False, False, True, False, False]])
+    predicted, positions, valid = model._pair_predictor_inputs(pair, idx, mask, targets)
+    np.testing.assert_array_equal(positions, [[0, 1, 3, 5, 2, 4, 8]])
+    np.testing.assert_array_equal(valid, [[True, True, True, True, False, False, True]])
+    context_slots = [0, 2, 6]
+    encoder_slots = [0, 1, 3]
+    np.testing.assert_array_equal(
+        np.asarray(predicted)[0][np.ix_(context_slots, context_slots)],
+        np.asarray(pair)[0][np.ix_(encoder_slots, encoder_slots)],
+    )
+    assert np.all(np.asarray(predicted)[0, 4:6] == 0)
+    assert np.all(np.asarray(predicted)[0, :, 4:6] == 0)
+
+    seed = np.asarray(model.pair_mask_token[...])
+    for row, column in ((1, 0), (1, 3), (3, 1), (1, 6), (6, 1)):
+        expected = np.concatenate((
+            _rotate_endpoint(seed[:4], int(positions[0, row])),
+            _rotate_endpoint(seed[4:], int(positions[0, column])),
+        ))
+        np.testing.assert_allclose(predicted[0, row, column], expected, atol=1e-8)
+        np.testing.assert_allclose(np.linalg.norm(expected), np.linalg.norm(seed), rtol=1e-6)
+    assert not np.array_equal(predicted[0, 1, 0], predicted[0, 3, 0])
 
 
 def _nudge_zero_initialised_branches(model: PeakSetJEPAJax) -> None:
@@ -240,9 +346,11 @@ def test_the_predictor_is_what_composes_the_missing_distances():
     # encoder never saw; if it is not trained the seeded entries are frozen.
     assert _largest(grads, "pair_mask_token") > 0.0
 
-    # The sentinel is sufficient to hide labels. Keep target pair features so
-    # encoder gradients and target-specific intensity information survive.
-    assert _largest(grads, "encoder") > 0.0
+    # At initialization the predictor's zero-output residual branches have
+    # not yet learned to read context. Encoder gradients start through those
+    # branches once their output projections move off zero.
+    _nudge_zero_initialised_branches(model)
+    assert _largest(_gradients(model, _batch()), "encoder") > 0.0
 
 
 def test_the_distogram_trains_the_encoder_through_the_pair_track():
@@ -302,7 +410,8 @@ def test_empty_supervision_has_zero_finite_loss_and_gradients(empty):
 
 
 @pytest.mark.parametrize("overrides,match", [
-    ({"masked_token_input_mode": "latent_token"}, "mz_sentinel"),
+    ({"masked_token_input_mode": "mz_sentinel"}, "latent_token"),
+    ({"pairmixer_pair_dim": 6}, "divisible by 4"),
     ({"distogram_loss_weight": 0}, "distogram_loss_weight"),
     ({"mae_loss_weight": 1}, "other loss weights"),
 ])
@@ -337,7 +446,7 @@ def test_config_trains_the_pair_branch_at_reference_capacity():
     assert config.num_peaks == 63
     assert config.encoder_use_cls_token is True
     assert config.max_duration_hours == 72.0
-    assert config.masked_token_input_mode == "mz_sentinel"
+    assert config.masked_token_input_mode == "latent_token"
     assert config.mae_loss_weight == 0.0
     assert config.mae_mz_multiscale_widths == ()
     assert config.distogram_loss_weight == 1.0
@@ -406,6 +515,7 @@ def test_metadata_adaln_gates_learn_and_condition_the_pair_stream():
     )
     model = _model(encoder_metadata_schema=MASSIVE_V2_ACQUISITION_SCHEMA,
         encoder_metadata_conditioning="adaln_zero", encoder_metadata_condition_dim=8)
+    _nudge_zero_initialised_branches(model)
     batch = dict(_batch(batch=1), spectrum_metadata=jnp.ones((1, MASSIVE_V2_CONDITION_DIM)))
     grads = _gradients(model, batch)
     assert _largest(grads, "encoder/blocks/0/adaLN_modulation") > 0
@@ -449,7 +559,8 @@ def test_ga4_train_step_matches_manual_accumulation_with_bf16_adam():
 
 def test_cls_occupies_one_pair_position_and_never_receives_distance_supervision():
     model = _model(encoder_use_cls_token=True, predictor_target_max_tokens=1,
-        pairmixer_fast_encoder_max_visible_tokens=6)
+        pairmixer_fast_encoder_max_visible_tokens=5,
+        pairmixer_fast_max_visible_tokens=6)
     batch = _batch(batch=1)
     batch["context_mask"] = jnp.array([[True, True, True, True, False, False, False, False]])
     batch["target_masks"] = jnp.array([[[False, False, False, False, True, False, False, False]]])
@@ -457,8 +568,8 @@ def test_cls_occupies_one_pair_position_and_never_receives_distance_supervision(
         batch["peak_mz"], batch["peak_intensity"], batch["context_mask"], batch["target_masks"])
     pair, idx, mask = model.encoder(mz, intensity, valid_mask=batch["peak_valid_mask"],
         visible_mask=visible, precursor_mz=batch["precursor_mz"])
-    assert pair.shape == (1, 6, 6, 8)
-    np.testing.assert_array_equal(np.asarray(idx), [[0, 1, 2, 3, 4, 8]])
+    assert pair.shape == (1, 5, 5, 8)
+    np.testing.assert_array_equal(np.asarray(idx), [[0, 1, 2, 3, 8]])
     assert np.asarray(mask).all()
     assert not hasattr(model.encoder, "cls_token")
     def score(features, targets):
@@ -477,8 +588,8 @@ def test_cls_pairs_receive_gradients_through_triangle_updates():
     assert _largest(grads, "encoder/cls_to_peak_pair_token") > 0
 
 
-def test_n64_config_compacts_to_context_targets_and_cls():
+def test_n64_config_has_separate_context_and_predictor_capacities():
     from spectra_learning.models.fastmixer_capacity import pairmixer_fast_stage_capacities
     config = load_config(CONFIG)
     assert config.num_peaks + int(config.encoder_use_cls_token) == 64
-    assert pairmixer_fast_stage_capacities(config) == ((55, 55, 16),)
+    assert pairmixer_fast_stage_capacities(config) == ((39, 55, 16),)
