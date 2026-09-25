@@ -41,6 +41,15 @@ tpu = [
     "orbax-checkpoint>=0.12.4",
 ]
 
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Ship only the importable library; configs, scripts and tests stay in the repo.
+module-name = "spectra_learning"
+module-root = ""
+
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"

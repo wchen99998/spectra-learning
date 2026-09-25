@@ -32,6 +32,15 @@ def _mae_fast_capacities(
     target_fraction: float | None = None,
 ) -> tuple[int, int, int]:
     num_peaks = int(config.get("num_peaks", DEFAULT_NUM_PEAKS))
+    if str(config.get("mae_objective", "masked_reconstruction")).lower() == (
+        "absorbing_diffusion"
+    ):
+        # K is uniform in 1..N: all targets must fit, including the fully masked case.
+        return (
+            num_peaks - 1 + _num_cls_tokens(config),
+            pairmixer_fast_full_visible_tokens(config),
+            num_peaks,
+        )
     strategies = _mask_strategy_names(
         config.get("jepa_mask_strategy", "contiguous")
     )

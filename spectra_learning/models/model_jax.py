@@ -123,6 +123,11 @@ def build_peak_set_encoder_jax(
         metadata_schema=cfg.encoder_metadata_schema,
         metadata_conditioning=cfg.encoder_metadata_conditioning,
         metadata_condition_dim=cfg.encoder_metadata_condition_dim,
+        mz_quantization_bin_size=(
+            cfg.jepa_mae_mz_bin_size
+            if cfg.mae_objective == "absorbing_diffusion"
+            else None
+        ),
         pairmixer_fast_max_visible_tokens=(
             pairmixer_fast_encoder_max_visible_tokens
         ),
@@ -146,6 +151,25 @@ class PeakSetJEPAJax(nnx.Module):
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         cfg = PeakSetJEPASettings.create(settings, **overrides)
+        self.mae_objective = cfg.mae_objective
+        if self.mae_objective not in {"masked_reconstruction", "absorbing_diffusion"}:
+            raise ValueError(f"Unknown mae_objective: {self.mae_objective}")
+        if self.mae_objective == "absorbing_diffusion":
+            required = {
+                "training_mode": "mae",
+                "masked_token_input_mode": "latent_token",
+                "jepa_num_target_blocks": 1,
+                "encoder_use_cls_token": True,
+                "mae_mz_objective": "exact_ce",
+                "mae_mz_multiscale_weight": 0.0,
+                "mae_intensity_loss_weight": 0.0,
+                "mae_loss_weight": 1.0,
+                "distogram_loss_weight": 0.0,
+                "use_ema_teacher": False,
+            }
+            for name, expected in required.items():
+                if getattr(cfg, name) != expected:
+                    raise ValueError(f"absorbing_diffusion requires {name}={expected!r}")
         frozen_teacher_cfg = load_frozen_teacher_settings(cfg)
         self.settings = cfg
         self.training_mode = cfg.training_mode.lower()
@@ -435,12 +459,21 @@ class PeakSetJEPAJax(nnx.Module):
         self.uses_mae_value_heads = self.jepa_mae_loss_weight > 0 or (
             self.training_mode == "mae" and self.mae_loss_weight > 0
         )
+        if cfg.mae_mz_head not in {"linear", "readout"}:
+            raise ValueError(f"Unknown mae_mz_head: {cfg.mae_mz_head}")
+        if cfg.mae_mz_head == "readout":
+            if self.jepa_mae_num_mz_bins != self.target_projector_dim:
+                raise ValueError("mae_mz_head='readout' requires one m/z bin per readout dimension")
         self.jepa_mae_mz_head = (
-            Linear(
-                self.target_projector_dim,
-                self.jepa_mae_num_mz_bins,
-                compute_dtype=self.compute_dtype,
-                rngs=rngs,
+            (
+                Identity()
+                if cfg.mae_mz_head == "readout"
+                else Linear(
+                    self.target_projector_dim,
+                    self.jepa_mae_num_mz_bins,
+                    compute_dtype=self.compute_dtype,
+                    rngs=rngs,
+                )
             )
             if self.uses_mae_value_heads
             else None
@@ -1848,7 +1881,7 @@ class PeakSetJEPAJax(nnx.Module):
         mz_target = jnp.broadcast_to(mz_target[:, None, :], view_shape)
         intensity_target = jnp.broadcast_to(intensity_target[:, None, :], view_shape)
         per_token_ce = self._mz_cross_entropy_rows(mz_logits, mz_target)
-        mz_loss = _masked_mean(per_token_ce, target_masks)
+        mz_loss = self._mae_mean(per_token_ce, target_masks)
         multiscale_term, multiscale_metrics = self._mz_multiscale_loss(
             mz_logits,
             mz_target,
@@ -1977,7 +2010,7 @@ class PeakSetJEPAJax(nnx.Module):
         ):
             mz_logits = self.jepa_mae_mz_head(predictor_output_compact)
             per_token_ce = self._mz_cross_entropy_rows(mz_logits, mz_target)
-            mz_loss = _masked_mean(per_token_ce, target_slot)
+            mz_loss = self._mae_mean(per_token_ce, target_slot)
             target_weights = target_slot.astype(jnp.float32)
             mz_accuracy = (
                 (
@@ -2009,6 +2042,7 @@ class PeakSetJEPAJax(nnx.Module):
                 predictor_output_compact,
                 mz_target,
                 target_slot,
+                per_example=self.mae_objective == "absorbing_diffusion",
             )
             mz_accuracy = mz_loss * 0.0
 
@@ -2057,6 +2091,11 @@ class PeakSetJEPAJax(nnx.Module):
             "mae_intensity_accuracy": intensity_accuracy,
             **extra_metrics,
         }
+
+    def _mae_mean(self, values: Array, mask: Array) -> Array:
+        if self.mae_objective == "absorbing_diffusion":
+            return _masked_per_example_mean(values, mask)
+        return _masked_mean(values, mask)
 
     def _jepa_mae_metrics(
         self,
@@ -2271,6 +2310,16 @@ def _masked_mean(values: Array, valid_mask: Array) -> Array:
     return (values * weights).sum() / jnp.maximum(weights.sum(), 1.0)
 
 
+def _masked_per_example_mean(values: Array, valid_mask: Array) -> Array:
+    """Uniform K sampling needs CE/K per spectrum, with no extra 1/r factor."""
+    weights = valid_mask.astype(jnp.float32)
+    axes = tuple(range(1, values.ndim))
+    return jnp.mean(
+        (values * weights).sum(axis=axes)
+        / jnp.maximum(weights.sum(axis=axes), 1.0)
+    )
+
+
 def _nearest_context_gap_da(
     target_mz: Array,
     peak_mz: Array,
@@ -2337,10 +2386,12 @@ def _masked_ce_loss_from_logits(
 
 
 def _linear_head_masked_ce_loss(
-    linear: Linear,
+    linear: Linear | Identity,
     x: Array,
     targets: Array,
     valid_mask: Array,
+    *,
+    per_example: bool = False,
 ) -> Array:
     loss_rows, weight_rows = _linear_head_masked_ce_rows(
         linear,
@@ -2348,11 +2399,13 @@ def _linear_head_masked_ce_loss(
         targets,
         valid_mask,
     )
+    if per_example:
+        return _masked_per_example_mean(loss_rows, valid_mask)
     return loss_rows.sum() / jnp.maximum(weight_rows.sum(), 1.0)
 
 
 def _linear_head_masked_ce_rows(
-    linear: Linear,
+    linear: Linear | Identity,
     x: Array,
     targets: Array,
     valid_mask: Array,

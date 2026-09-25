@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import cast
 
 import jax
@@ -137,11 +138,13 @@ class PeakSetEncoder(nnx.Module):
         metadata_schema: str | None = None,
         metadata_conditioning: str = "additive",
         metadata_condition_dim: int = 256,
+        mz_quantization_bin_size: float | None = None,
         rngs: nnx.Rngs | None = None,
         compute_dtype: object = jnp.float32,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_layers = num_layers
+        self.mz_quantization_bin_size = mz_quantization_bin_size
         self.use_cls_token = use_cls_token
         self.use_pair_path = use_pair_path
         self.metadata_schema = metadata_schema
@@ -328,11 +331,23 @@ class PeakSetEncoder(nnx.Module):
         peak_visible_mask = merge_visible_mask(peak_valid_mask, visible_mask)
         if peak_visible_mask is None:
             peak_visible_mask = peak_valid_mask
-        x = self.embedder(peak_mz, peak_intensity)
+        x = self.embedder(self._quantize_mz(peak_mz), peak_intensity)
         metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
         if metadata_embedding is not None and self.metadata_conditioning != "adaln_zero":
             x = x + metadata_embedding[:, None, :].astype(x.dtype)
         return x, peak_visible_mask, metadata_embedding
+
+    def _quantize_mz(self, peak_mz: Array) -> Array:
+        """Use the same categorical state for denoising and clean embeddings."""
+        if self.mz_quantization_bin_size is None:
+            return peak_mz
+        width = self.mz_quantization_bin_size
+        bins = jnp.clip(
+            jnp.floor(peak_mz.astype(jnp.float32) * PEAK_MZ_MAX / width),
+            0,
+            math.ceil(PEAK_MZ_MAX / width) - 1,
+        )
+        return (bins + 0.5) * (width / PEAK_MZ_MAX)
 
     def _append_cls_pair_tokens(self, pair: Array) -> Array:
         if not self.use_cls_token:
@@ -368,7 +383,7 @@ class PeakSetEncoder(nnx.Module):
             spectrum_metadata,
         )
         z = cast(PairFeatureEmbedder, self.pair_embedder)(
-            peak_mz,
+            self._quantize_mz(peak_mz),
             peak_intensity,
             x,
             peak_visible_mask,
@@ -436,7 +451,7 @@ class PeakSetEncoder(nnx.Module):
             spectrum_metadata,
         )
         z = cast(PairFeatureEmbedder, self.pair_embedder)(
-            peak_mz,
+            self._quantize_mz(peak_mz),
             peak_intensity,
             x,
             peak_visible_mask,

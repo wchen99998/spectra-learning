@@ -82,6 +82,8 @@ class PeakSetJEPASettings:
     encoder_mz_token_embedding_dim: int = 77
     masked_token_loss_weight: float = 0.0
     mae_loss_weight: float = 1.0
+    mae_objective: str = "masked_reconstruction"
+    mae_mz_head: str = "linear"
     jepa_mae_loss_weight: float = 0.0
     distogram_loss_weight: float = 0.0
     distogram_pair_dim: int | None = None
