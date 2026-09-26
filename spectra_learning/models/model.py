@@ -207,6 +207,10 @@ class PeakSetJEPA(nn.Module):
     ) -> None:
         super().__init__()
         cfg = PeakSetJEPASettings.create(settings, **overrides)
+        if cfg.mae_objective != "masked_reconstruction":
+            raise ValueError("absorbing diffusion requires the JAX training backend")
+        if cfg.mae_mz_head != "linear":
+            raise ValueError("mae_mz_head='readout' requires the JAX training backend")
         frozen_teacher_cfg = load_frozen_teacher_settings(cfg)
         self._configure_dimensions(cfg)
         self._configure_targets(cfg, frozen_teacher_cfg)

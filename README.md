@@ -40,6 +40,37 @@ task/backend combinations fail before a trainer is imported.
 training implementation. It validates the same task/backend contract and the
 generated task delegates to `train.py`.
 
+### Periodic JEPA teacher promotion
+
+`configs/1p8b_periodic_teacher_jepa.py` starts a fresh 1.8B student and optimizer.
+Its initial teacher is the student encoder from step 1,190,000 of
+[the frozen-teacher JEPA run](https://wandb.ai/iclac/jepa-finalrun/runs/1p8b-ftjepa-t1p8b-s666k-perleaf-b1024-v6e32-20260905-115335).
+The preset retains that run's batch 1024, accumulation 8, fixed random masks,
+per-leaf ZeRO-1 Adam, and two-million-step budget.
+
+Set `frozen_teacher_update_every_steps` on the JAX `mae_teacher_jepa` path to
+promote the student encoder after that many completed optimizer steps; zero
+(the default) keeps the initial teacher frozen for the entire run. Teacher and
+student encoders must have matching architectures. Promotion copies the full
+encoder state, including fixed Fourier buffers, and leaves the student,
+predictor, and optimizer running continuously. The teacher is frozen between
+promotions. With this preset, steps 1–50,000 use the initial teacher; step
+50,001 uses the student snapshot taken after update 50,000. Later promotions
+occur at 100,000, 150,000, and so on. Checkpoints retain the current teacher,
+and resuming the same workdir keeps this schedule.
+
+Launch a new run on 32 v6e chips using the existing infrastructure launcher:
+
+```bash
+RUN_ID="1p8b-periodic-jepa-p50k-$(date -u +%Y%m%d-%H%M%S)"
+.venv/bin/python train_sky.py \
+    --config configs/1p8b_periodic_teacher_jepa.py \
+    --tpu-generation v6e --chips 32 --dws-run-duration 7d \
+    --run-id "${RUN_ID}" \
+    --workdir "gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}" \
+    --detach-run
+```
+
 ## MassIVE v2 MS2 shards
 
 Pretraining uses a one-time, streaming conversion of

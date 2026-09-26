@@ -68,6 +68,7 @@ class GemsDataConfig:
     jepa_allow_target_overlap: bool
     training_task: str
     training_mode: str
+    mae_objective: str
     sjepa_num_global_views: int
     sjepa_num_local_views: int
     sjepa_global_view_fraction: float
@@ -109,6 +110,18 @@ class GemsDataConfig:
             int(length) for length in config.get("jepa_mask_lengths", (1, 2, 4, 8, 16))
         )
         dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
+        training_mode = str(config.get("training_mode", "jepa")).lower()
+        mae_objective = str(
+            config.get("mae_objective", "masked_reconstruction")
+        ).lower()
+        num_target_blocks = int(config.get("jepa_num_target_blocks", 2))
+        if mae_objective not in {"masked_reconstruction", "absorbing_diffusion"}:
+            raise ValueError(f"Unknown mae_objective: {mae_objective}")
+        if mae_objective == "absorbing_diffusion":
+            if training_mode != "mae":
+                raise ValueError("absorbing_diffusion requires training_mode='mae'")
+            if num_target_blocks != 1:
+                raise ValueError("absorbing_diffusion requires jepa_num_target_blocks=1")
         return cls(
             artifact_dir=artifact_dir,
             gems_hdf5_repo_id=str(
@@ -172,7 +185,7 @@ class GemsDataConfig:
                     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
                 )
             ),
-            jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
+            jepa_num_target_blocks=num_target_blocks,
             jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
             jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
             jepa_block_min_len=int(config.get("jepa_block_min_len", 1)),
@@ -205,7 +218,8 @@ class GemsDataConfig:
                 config.get("jepa_allow_target_overlap", False)
             ),
             training_task=str(config.get("training_task", "pretrain")).lower(),
-            training_mode=str(config.get("training_mode", "jepa")).lower(),
+            training_mode=training_mode,
+            mae_objective=mae_objective,
             sjepa_num_global_views=int(config.get("sjepa_num_global_views", 1)),
             sjepa_num_local_views=int(config.get("sjepa_num_local_views", 3)),
             sjepa_global_view_fraction=float(

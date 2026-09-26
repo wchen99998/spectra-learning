@@ -114,3 +114,25 @@ def test_1p8b_mae_teacher_jepa_matches_teacher_backbone_and_inputs() -> None:
     assert config.jax_zero1_mode == "per_leaf"
     assert "-bf16state-zero1-perleaf-" in config.run_name_suffix
     assert "-bs1024-" in config.run_name_suffix
+
+
+def test_periodic_teacher_starts_from_linked_jepa_encoder_with_same_recipe() -> None:
+    config = load_config("configs/1p8b_periodic_teacher_jepa.py")
+    baseline = load_config("configs/1p8b_mae_teacher_jepa.py")
+
+    assert config.frozen_teacher_update_every_steps == 50_000
+    assert baseline.frozen_teacher_update_every_steps == 0
+    assert config.frozen_teacher_config_path == "configs/1p8b_mae_teacher_jepa.py"
+    assert config.frozen_teacher_checkpoint_path == (
+        "gs://metal-repeater-411410-spectra-checkpoints/skypilot/"
+        "1p8b-ftjepa-t1p8b-s666k-perleaf-b1024-v6e32-20260905-115335/"
+        "checkpoints/orbax/1190000"
+    )
+    for key in (
+        "device_backend", "training_mode", "model_dim", "predictor_dim",
+        "encoder_num_layers", "encoder_num_heads", "batch_size",
+        "gradient_accumulation_steps", "optimizer", "learning_rate",
+        "optimizer_state_dtype", "jax_zero1_mode", "jepa_context_fraction",
+        "jepa_target_fraction", "jepa_mask_strategy", "training_max_steps",
+    ):
+        assert config[key] == baseline[key], key

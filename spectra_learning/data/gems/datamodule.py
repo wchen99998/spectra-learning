@@ -66,6 +66,7 @@ class GemsDataModule:
     jepa_gap_aware_bucket_edges_da: tuple[float, ...]
     jepa_gap_aware_bucket_weights: tuple[float, ...]
     jepa_allow_target_overlap: bool
+    mae_objective: str
     num_peaks_output: int
     dataloader_pin_memory: bool
     dataloader_num_workers: int
@@ -211,6 +212,7 @@ class GemsDataModule:
         minimum_peaks = (
             self.jepa_num_target_blocks * self.jepa_block_min_len + 1
             if self.training_task == "pretrain"
+            and self.mae_objective != "absorbing_diffusion"
             else 1
         )
         if minimum_peaks > eligibility["min_usable_peaks"]:
@@ -496,6 +498,7 @@ class GemsDataModule:
             augmentation_epoch=epoch,
             augmentation_split=split,
             augment=augment,
+            mae_objective=self.mae_objective,
             num_target_blocks=self.jepa_num_target_blocks,
             context_fraction=self.jepa_context_fraction,
             target_fraction=self.jepa_target_fraction,

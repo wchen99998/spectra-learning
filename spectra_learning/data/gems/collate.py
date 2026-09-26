@@ -92,7 +92,13 @@ class GemsBatchCollator:
         augmentation_seed: int | None = None,
         augmentation_epoch: int = 0,
         augmentation_split: str = "train",
+        mae_objective: str = "masked_reconstruction",
     ) -> None:
+        if mae_objective not in {"masked_reconstruction", "absorbing_diffusion"}:
+            raise ValueError(f"Unknown mae_objective: {mae_objective}")
+        if mae_objective == "absorbing_diffusion" and num_target_blocks != 1:
+            raise ValueError("absorbing_diffusion requires num_target_blocks=1")
+        self.mae_objective = mae_objective
         self.augmentation_seed = augmentation_seed
         self.augmentation_epoch = augmentation_epoch
         self.augmentation_split = augmentation_split
@@ -143,7 +149,12 @@ class GemsBatchCollator:
         batch: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         minimum_peaks = self.num_target_blocks * self.block_min_len + 1
-        eligible = batch["peak_valid_mask"].sum(dim=1) >= minimum_peaks
+        if self.mae_objective == "absorbing_diffusion":
+            minimum_peaks = 1
+            # Preprocessing gives empty spectra a valid zero-intensity placeholder.
+            eligible = (batch["peak_intensity"] > 0).any(dim=1)
+        else:
+            eligible = batch["peak_valid_mask"].sum(dim=1) >= minimum_peaks
         eligible_rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         missing_rows = torch.nonzero(~eligible, as_tuple=False).squeeze(-1)
         if eligible_rows.numel() == 0:
@@ -324,6 +335,8 @@ class GemsBatchCollator:
                 targets.append(target)
             return torch.cat(contexts), torch.cat(targets)
         sampling_valid_mask = batch["peak_valid_mask"]
+        if self.mae_objective == "absorbing_diffusion":
+            return self._sample_absorbing_diffusion_masks(sampling_valid_mask)
 
         strategies = self._mask_strategy_pool()
         if len(strategies) == 1:
@@ -355,6 +368,22 @@ class GemsBatchCollator:
             )
 
         return context_mask, target_masks
+
+    def _sample_absorbing_diffusion_masks(
+        self,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample a uniform nonempty mask count and a uniform subset at that count."""
+        targets = torch.zeros_like(valid_mask)
+        for row_index, row_valid in enumerate(valid_mask):
+            valid_count = int(row_valid.sum())
+            mask_count = int(
+                torch.randint(1, valid_count + 1, (), device=valid_mask.device)
+            )
+            targets[row_index] = _sample_random_mask_1d_torch(
+                row_valid, mask_count=mask_count
+            )
+        return valid_mask & ~targets, targets.unsqueeze(1)
 
     def _mask_strategy_pool(self) -> tuple[str, ...]:
         pool: list[str] = []

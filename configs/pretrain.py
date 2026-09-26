@@ -77,6 +77,8 @@ def get_config() -> config_dict.ConfigDict:
 
     # MAE masking and reconstruction objectives
     cfg.training_mode = "mae"
+    cfg.mae_objective = "masked_reconstruction"
+    cfg.mae_mz_head = "linear"
     cfg.use_ema_teacher = False
     cfg.jepa_num_target_blocks = 1
     cfg.jepa_mask_strategy = ["intensity_aware", "ragged"]
@@ -144,6 +146,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ema_teacher_schedule = "cosine"
     cfg.frozen_teacher_config_path = None
     cfg.frozen_teacher_checkpoint_path = None
+    # Hard student snapshots after this many optimizer steps; zero stays frozen.
+    cfg.frozen_teacher_update_every_steps = 0
 
     # Training
     cfg.num_epochs = 8

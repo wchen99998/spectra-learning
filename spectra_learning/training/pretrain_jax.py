@@ -6,7 +6,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -1271,6 +1271,14 @@ def jax_config_checkpoint_contract(
     effective_config.pop("config_path", None)
     effective_config.pop("jax_resume_allowed_config_keys", None)
     effective_config.pop("jax_resume_allowed_dataset_keys", None)
+    if effective_config.get("mae_objective") == "masked_reconstruction":
+        # Existing MAE/JEPA checkpoints predate the optional diffusion objective.
+        effective_config.pop("mae_objective")
+    if effective_config.get("mae_mz_head") == "linear":
+        effective_config.pop("mae_mz_head")
+    if effective_config.get("frozen_teacher_update_every_steps", 0) == 0:
+        # Preserve the contract of checkpoints saved before periodic teachers.
+        effective_config.pop("frozen_teacher_update_every_steps", None)
     return {"config": effective_config}
 
 
@@ -1310,6 +1318,48 @@ def _pretrain_jax_checkpoint_contract(
 def _validate_pretrain_jax_model(model: Any) -> None:
     if model.use_ema_teacher:
         raise ValueError("JAX training uses pure Optax and does not support EMA teachers.")
+
+
+def _validate_frozen_teacher_update_config(
+    config: config_dict.ConfigDict,
+    model: Any,
+) -> int:
+    interval = config.get("frozen_teacher_update_every_steps", 0)
+    if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
+        raise ValueError("frozen_teacher_update_every_steps must be a nonnegative integer")
+    if interval == 0:
+        return interval
+    if not isinstance(model, PeakSetJEPAJax) or not model.use_frozen_teacher:
+        raise ValueError(
+            "frozen_teacher_update_every_steps requires training_mode='mae_teacher_jepa'"
+        )
+
+    # Teacher inference sees all peaks while the student packs its context.
+    # Compare the remaining graph metadata as well as parameter shapes: head
+    # counts and normalization settings can differ without changing shapes.
+    teacher = nnx.clone(model.teacher_encoder, variables=False)
+    teacher.pairmixer_fast_max_visible_tokens = (
+        model.encoder.pairmixer_fast_max_visible_tokens
+    )
+    if teacher.use_pair_path and model.encoder.use_pair_path:
+        for teacher_block, student_block in zip(teacher.blocks, model.encoder.blocks):
+            teacher_block.fastmixer_max_visible_tokens = (
+                student_block.fastmixer_max_visible_tokens
+            )
+    teacher_leaves = jax.tree.leaves(nnx.state(teacher))
+    student_leaves = jax.tree.leaves(nnx.state(model.encoder))
+    if (
+        nnx.graphdef(teacher) != nnx.graphdef(model.encoder)
+        or len(teacher_leaves) != len(student_leaves)
+        or any(
+            teacher.shape != student.shape or teacher.dtype != student.dtype
+            for teacher, student in zip(teacher_leaves, student_leaves)
+        )
+    ):
+        raise ValueError(
+            "Periodic frozen teacher updates require matching student and teacher encoders"
+        )
+    return interval
 
 
 def _validate_jax_task_probe_config(
@@ -1397,6 +1447,33 @@ def _update_grouped_jepa_ema_state(
 
 
 update_grouped_jepa_ema_state = jax.jit(_update_grouped_jepa_ema_state)
+
+
+@partial(jax.jit, donate_argnums=(0,), keep_unused=True)
+def _copy_student_to_frozen_teacher(teacher_state: Any, student_state: Any) -> Any:
+    # Reuse the old teacher allocation, never the student buffers: the next
+    # optimizer step donates those buffers while this snapshot must stay fixed.
+    return jax.tree.map(jnp.copy, student_state)
+
+
+def promote_frozen_teacher_state(
+    trainable_params: nnx.State,
+    static_state: nnx.State,
+) -> nnx.State:
+    """Snapshot the student, consuming the previous teacher's array buffers."""
+    student_state = nnx.merge_state(trainable_params, static_state)
+    modules = {"teacher_encoder": "encoder"}
+    if "teacher_target_projector" in static_state:
+        modules["teacher_target_projector"] = "target_projector"
+    teacher = nnx.State({name: static_state[name] for name in modules})
+    student = nnx.State(
+        {name: student_state[source] for name, source in modules.items()}
+    )
+    snapshot = _copy_student_to_frozen_teacher(teacher, student)
+    updated = nnx.map_state(lambda _path, value: value, static_state)
+    for name in modules:
+        updated[name] = snapshot[name]
+    return updated
 
 
 def make_grouped_jepa_teacher_target_step(
@@ -1506,6 +1583,9 @@ class _JaxTrainingLoop:
         self.group_jepa_lookahead = (
             self.group_jepa_ema_momentum is not None
             and self.group_jepa_target_mode == "lookahead"
+        )
+        self.frozen_teacher_update_every_steps = _validate_frozen_teacher_update_config(
+            config, model
         )
         (
             self.state,
@@ -1766,7 +1846,7 @@ class _JaxTrainingLoop:
                 teacher_target_step.clear_cache()
             gc.collect()
             logging.info(
-                "Released JAX executable cache for MAE mask stage %d",
+                "Released JAX executable cache for mask stage %d",
                 self.mask_stage_index + 1,
             )
         stage = self.mask_stages[stage_index]
@@ -1790,13 +1870,24 @@ class _JaxTrainingLoop:
         self.eval_step = self.eval_steps[stage_index]
         self.teacher_target_step = self.teacher_target_steps[stage_index]
         self.mask_stage_index = stage_index
+        if self.config.mae_objective == "absorbing_diffusion":
+            objective_label = "Absorbing diffusion"
+            mask_description = (
+                "masked_count=Uniform{1,...,N_valid} context=complement"
+            )
+        else:
+            objective_label = "MAE"
+            mask_description = (
+                f"context_fraction={stage.context_fraction:.2f} "
+                f"target_fraction={stage.target_fraction:.2f}"
+            )
         logging.info(
-            "MAE mask stage %d: context_fraction=%.2f target_fraction=%.2f "
+            "%s mask stage %d: %s "
             "encoder_tokens=%d predictor_tokens=%d target_tokens=%d "
             "accumulation_steps=%d",
+            objective_label,
             stage_index + 1,
-            stage.context_fraction,
-            stage.target_fraction,
+            mask_description,
             encoder_tokens,
             predictor_tokens,
             target_tokens,
@@ -2138,6 +2229,7 @@ class _JaxTrainingLoop:
             )
         self.state.trainable_params = params
         self.state.opt_state = opt_state
+        self._maybe_update_frozen_teacher(self.global_step + 1)
         if self.timing_barriers:
             jax.block_until_ready(
                 (
@@ -2161,6 +2253,24 @@ class _JaxTrainingLoop:
         self.last_metrics = metrics
         self.global_step += 1
         return metrics, next_teacher_target
+
+    def _maybe_update_frozen_teacher(self, completed_steps: int) -> None:
+        interval = self.frozen_teacher_update_every_steps
+        if interval <= 0 or completed_steps % interval != 0:
+            return
+        self.state.static_state = promote_frozen_teacher_state(
+            self.state.trainable_params,
+            self.state.static_state,
+        )
+        # Release the model's references to the previous teacher buffers.
+        nnx.update(self.model, self.state.static_state)
+        if jax.process_index() == 0:
+            logging.info(
+                "Promoted student to frozen teacher after optimizer step %d; "
+                "next promotion at step %d",
+                completed_steps,
+                completed_steps + interval,
+            )
 
     def _log_or_stage_train_metrics(
         self,
