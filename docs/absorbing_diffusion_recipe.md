@@ -115,6 +115,7 @@ RUN_ID="1p8b-absorbing-diffusion-$(date -u +%Y%m%d-%H%M%S)"
     --config configs/1p8b_absorbing_diffusion.py \
     --tpu-generation v6e --chips 32 --dws-run-duration 4d \
     --override max_duration_hours=95.0 \
+    --override "jax_training_deadline_path=\"gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}/training_deadline.txt\"" \
     --run-id "${RUN_ID}" \
     --workdir "gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}" \
     --detach-run --dry-run
@@ -130,6 +131,28 @@ On 2026-09-22, the launcher dry run completed successfully and resolved topology
 steps. It generated
 `tmp/skypilot_tasks/1p8b-absorbing-diffusion-dryrun-20260922.yaml` and skipped
 credential lookup and job submission. No training run was launched by that check.
+
+### Four-day run submitted on 2026-09-22
+
+The user-authorized run is SkyPilot managed job **87**, named
+`spectra-adiff-1p8b-ep-v6e32-4d-20260922-080322`. Its run ID is
+`adiff-1p8b-ep-v6e32-4d-20260922-080322`, with W&B project `iclac/jepa-finalrun`
+and workdir
+`gs://metal-repeater-411410-spectra-checkpoints/skypilot/adiff-1p8b-ep-v6e32-4d-20260922-080322`.
+
+It requests 32 v6e chips for a 96-hour DWS allocation and limits training to
+95 hours to leave setup/checkpoint headroom. Rank zero persists the absolute
+training deadline in `training_deadline.txt` under that workdir; recovery reuses
+the deadline instead of granting another 95 hours. The existing graceful-stop
+path saves and waits for the final checkpoint. Ten deadline and wall-clock-stop
+tests passed before submission.
+
+The job uses a clean source snapshot containing the runtime code, configs,
+scripts, and dependency files. This avoids SkyPilot's recursive ignore-file scan
+following historical results symlinks back into the repository. The first,
+unsubmitted upload request was cancelled and its empty temporary bucket removed.
+Submission succeeded and job 87 entered `STARTING` while requesting capacity.
+Inspect current status with `sky jobs queue`, and logs with `sky jobs logs 87`.
 
 ## Validation
 

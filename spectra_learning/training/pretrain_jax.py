@@ -68,7 +68,10 @@ from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.storage import (
     local_scratch_dir,
     normalize_storage_path,
+    read_text,
+    storage_exists,
     storage_join,
+    write_text,
 )
 
 
@@ -1408,12 +1411,24 @@ def _jax_training_deadline(config: config_dict.ConfigDict) -> float | None:
     max_duration_hours = config.get("max_duration_hours", None)
     if max_duration_hours is None:
         return None
+    deadline = _jax_wall_time() + float(max_duration_hours) * 3600.0
     if jax.process_index() == 0:
         logging.info(
             "Training wall-clock budget: %.2f hours",
             float(max_duration_hours),
         )
-    return _jax_wall_time() + float(max_duration_hours) * 3600.0
+        deadline_path = config.get("jax_training_deadline_path", "")
+        if deadline_path:
+            if storage_exists(deadline_path):
+                deadline = float(read_text(deadline_path))
+                if not math.isfinite(deadline):
+                    raise ValueError("Saved training deadline must be finite")
+            else:
+                write_text(deadline_path, f"{deadline}\n")
+            logging.info("Persistent training deadline: %.3f", deadline)
+    # Every rank needs a deadline to participate in the time-limit broadcast;
+    # only rank zero compares its value against the clock.
+    return deadline
 
 
 def _jax_process_bool_broadcast(value: bool) -> bool:
