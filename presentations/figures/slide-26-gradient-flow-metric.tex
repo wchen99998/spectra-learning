@@ -1,0 +1,27 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 26; figure 24; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\eqn{1.05}{6.38}{\dot r=-\left(\underbrace{\eta_eJ_gJ_fJ_f^\top J_g^\top}_{\text{encoder contribution}}+\underbrace{\eta_pJ_\phi J_\phi^\top}_{\text{predictor contribution}}\right)r}
+\eqn{1.05}{4.45}{-\dot{\mathcal L}=\eta_e\|\nabla_\theta\mathcal L\|^2+\eta_p\|\nabla_\phi\mathcal L\|^2}
+\node[small,anchor=west,inner sep=0] at (1.15,3.48) {Local predictor geometry};
+\foreach \x in {1.40,1.65,1.90}{\draw[fill=soft,draw=line,line width=.55pt] (\x,2.60) rectangle +(.17,.51);}
+\node[tinytext,anchor=east] at (1.35,2.85) {$\mathrm dz$};
+\node[box,minimum width=1.35cm,minimum height=.57cm,inner sep=3pt] (jac) at (3.45,2.85) {$J_g$};
+\draw[arr] (2.20,2.85)--(jac.west);
+\foreach \x in {4.88,5.13,5.38}{\draw[fill=soft,draw=line,line width=.55pt] (\x,2.60) rectangle +(.17,.51);}
+\draw[arr] (jac.east)--(4.73,2.85);
+\node[tinytext,anchor=west] at (5.62,2.85) {$\mathrm d\hat y$};
+\node[anchor=west,inner sep=0,small] at (1.15,2.17) {$\|\mathrm d\hat y\|^2=\mathrm dz^\top G_z\,\mathrm dz,\quad G_z=J_g^\top J_g$};
+\draw[line,line width=.55pt] (7.50,2.10)--(7.50,3.57);
+\node[small,anchor=north west,inner sep=0,align=left] at (8.15,3.48) {\textbf{Continuous gradient descent}\\Exact loss-rate decomposition};
+\node[small,anchor=north west,inner sep=0,align=left] at (8.15,2.68) {\textbf{AdamW / momentum / decay}\\Attribution changes with the optimizer};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

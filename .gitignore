@@ -59,3 +59,15 @@ docs/frozen_jepa_salt_audit_20260905.md
 /docs/flare_model_progression.md
 /docs/original_flare_recipe_math.html
 /docs/original_flare_recipe_math.md
+docs/tpu7x_mig_dws_investigation.md
+
+# Presentations: track LaTeX/TikZ sources, tooling and notes; ignore compiled
+# outputs, source bundles, copied external material and licensed brand fonts.
+/presentations/**/*.pdf
+!/presentations/assets/novogaia-logo.pdf
+!/presentations/assets/dynamics-modes.pdf
+/presentations/figures/fig-09-dynamics.svg
+/presentations/*.zip
+/presentations/assets/PPNeueMontreal-*
+/presentations/research/md4_ar_sources/
+/presentations/research/novogaia-home.html

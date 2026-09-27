@@ -1,0 +1,56 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 24; figure 23; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+% Three column centres and a shared output baseline.
+\coordinate (generate) at (3.05,6.46);
+\coordinate (represent) at (8.10,6.46);
+\coordinate (retrieve) at (13.10,6.46);
+\foreach \name/\title in {generate/Generate,represent/Represent,retrieve/Retrieve}{
+ \node[font=\brandmedium\figurefont,inner sep=0] at (\name) {\title};}
+\draw[line,line width=.55pt] (5.55,6.64)--(5.55,2.00);
+\draw[line,line width=.55pt] (10.55,6.64)--(10.55,3.65);
+\draw[line,line width=.55pt] (10.55,2.48)--(10.55,2.00);
+
+\node[small,inner sep=0] at (3.05,5.93) {MIST fingerprint};
+\foreach \i/\shade in {0/12,1/85,2/30,3/65,4/20,5/90}{\draw[fill=ink!\shade,draw=ink,line width=.55pt] (1.55+\i*.45,5.25) rectangle +(.36,.39);}
+\node[inner sep=0] at (4.60,5.44) {$\hat f$};
+\node[box,text width=2.25cm,minimum height=.70cm,inner sep=4pt] (ar) at (3.05,4.40) {AR};
+\draw[arr] (3.05,5.12)--(ar.north);
+\coordinate (tokens) at (3.05,3.00);
+\foreach \i/\t in {0/O,1/c1,2/c,3/c,4/c,5/c,6/c1}{\node[box,minimum width=.34cm,minimum height=.55cm,inner sep=2pt,small] at (1.52+\i*.51,3.00) {\texttt{\t}};}
+\draw[arr] (ar.south)--($(tokens)+(0,.36)$);
+\node[font=\figurefont,inner sep=0] at (3.05,2.27) {$p(s\mid\hat f,F)=\prod_t p(s_t\mid s_{<t},\hat f,F)$};
+
+\node[box,text width=2.95cm,minimum height=.70cm,inner sep=4pt] (teacher) at (8.10,5.70) {Frozen MAE $T$};
+\node[font=\figurefont,inner sep=0] (loss) at (8.10,4.40) {$\|\widehat Y-Y\|_2^2$};
+\draw[arr] (teacher.south)--(loss.north);
+\node[small,anchor=west,inner sep=0] at (8.28,4.97) {$Y=\operatorname{sg}[T(S)]$};
+\node[small,inner sep=0] (prediction) at (8.10,3.74) {$\widehat Y=g_\phi(f_\theta(C),Q)$};
+\node[box,text width=2.95cm,minimum height=.70cm,inner sep=4pt] (student) at (8.10,3.00) {JEPA student $f_\theta$};
+\draw[-{Latex[length=1.2mm,width=.9mm]},line width=.55pt,draw=ink] (student.north)--(prediction.south);
+\draw[-{Latex[length=1.2mm,width=.9mm]},line width=.55pt,draw=ink] (prediction.north)--(loss.south);
+\node[inner sep=0] at (8.10,2.27) {$S_{\rm raw}\longrightarrow Z$};
+
+\node[small,inner sep=0] at (13.10,6.00) {Pair research};
+\coordinate (ra) at (12.08,4.83);
+\coordinate (rb) at (14.12,4.83);
+\coordinate (rc) at (13.10,5.62);
+\draw[ink,line width=.55pt] (ra)--(rb)--(rc)--cycle;
+\foreach \p in {ra,rb,rc}{\fill[ink] (\p) circle (.06);}
+\node[small,inner sep=0] at (13.10,5.12) {$Z_{ij}$};
+\node[box,text width=2.95cm,minimum height=.70cm,inner sep=4pt] (flare) at (13.10,3.00) {\small Global context\\+ GLACIER};
+\draw[arr,dashed] (13.10,4.68)--(flare.north);
+\node[small,anchor=west,inner sep=0] at (13.28,4.26) {Proposed};
+\node[small,anchor=west,inner sep=0] at (13.28,3.89) {$\Delta\mathrm{Hit@1}\;?$};
+\draw[arr] (student.east)--node[above,small] {$Z$}(flare.west);
+\node[inner sep=0] at (13.10,2.27) {$\mathrm{Hit@1}=36.94\%$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,60 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 22; figure 21; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+% Four stages; all mini-diagrams are schematic, not training measurements.
+\foreach \x/\title in {2.25/Contrastive\\warmup,6.05/Candidate\\evidence,9.85/Hard\\negatives,13.60/Mass\\agreement}{
+ \node[font=\figurefont,align=center,text width=3.15cm] at (\x,6.42) {\title};}
+\foreach \x in {3.84,7.64,11.44}{\draw[arr] (\x,4.63)--+(.43,0);}
+
+% Stage 1: positive pairs on the diagonal of an in-batch similarity matrix.
+\node at (2.25,5.50) {$G_j$};
+\node at (1.03,4.58) {$S_i$};
+\foreach \r in {0,...,2}{\foreach \c in {0,...,2}{
+ \pgfmathtruncatemacro{\shade}{ifthenelse(\r==\c,100,12)}
+ \fill[ink!\shade] (1.43+\c*.57,5.16-\r*.57) rectangle +(.49,-.49);}}
+\node[anchor=base,inner sep=0,font=\figurefont] at (2.25,2.95)
+ {$\mathcal L_{\rm NCE}^{\rm local}+\mathcal L_{\rm NCE}^{\rm global}$};
+
+% Stage 2: a common peak versus a peak that distinguishes the candidates.
+\foreach \x/\label in {5.38/1,5.98/2,6.58/3}{\node at (\x,5.50) {$G_{\label}$};}
+\node at (4.77,4.91) {$p_1$};\node at (4.77,4.16) {$p_2$};
+\foreach \x in {5.13,5.73,6.33}{\fill[ink!35] (\x,4.66) rectangle +(.5,.5);}
+\foreach \x in {5.13,6.33}{\fill[ink!8] (\x,3.91) rectangle +(.5,.5);}
+\fill[ink] (5.73,3.91) rectangle +(.5,.5);
+\node[anchor=base,inner sep=0] at (6.05,3.43) {$w_{p_1}<w_{p_2}$};
+\node[anchor=base,inner sep=0,font=\figurefont] at (6.05,2.95) {$\mathcal L_{\rm candidate\ CE}$};
+
+% Stage 3: score up to 32 sampled negatives; retain the hardest eight.
+\foreach \r in {0,...,3}{\foreach \c in {0,...,7}{
+ \ifnum\r=0
+  \fill[ink] (8.72+\c*.32,5.12-\r*.41) circle (.09);
+ \else
+  \draw[draw=ink,line width=.55pt,fill=white] (8.72+\c*.32,5.12-\r*.41) circle (.09);
+ \fi}}
+\node[anchor=base,inner sep=0] at (9.85,3.43) {$32\ \longrightarrow\ 8$};
+\node[anchor=base,inner sep=0,font=\figurefont] at (9.85,2.95) {$\mathcal D=\{G^+\}\cup\mathcal H_8$};
+
+% Stage 4: agreement between peak and candidate retained-mass fractions.
+\draw[ink,line width=.55pt] (12.27,4.22)--(14.92,4.22);
+\foreach \x/\lab in {12.27/0,14.92/1}{
+ \draw[ink,line width=.55pt] (\x,4.22)--+(0,-.10);
+ \node[anchor=north] at (\x,4.09) {\lab};}
+\draw[ink,line width=.55pt] (13.59,4.22)--(13.59,5.10);
+\draw[ink,line width=.55pt,dashed] (13.82,4.22)--(13.82,4.86);
+\node[anchor=south east] at (13.57,5.13) {$f_p$};
+\node[anchor=south west] at (13.84,4.89) {$f_*$};
+\node[anchor=base,inner sep=0] at (13.60,3.43) {Retained fraction};
+\node[anchor=base,inner sep=0,font=\figurefont] at (13.60,2.95) {$B=\beta e^{-(\Delta/\sigma)^2}$};
+
+\node[font=\figurefont] at (8.0,2.25)
+ {Frozen JEPA\quad$\longrightarrow$\quad trainable matcher\quad$\longrightarrow$\quad validation selection};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

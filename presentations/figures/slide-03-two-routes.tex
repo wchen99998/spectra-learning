@@ -1,0 +1,39 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 3; figure 02; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+% Data are shown as measured spectra and molecular graphs; boxes denote operations.
+\node[anchor=west,inner sep=0,tag] at (.75,6.55) {Generate};
+\spectrum{1.25}{5.02}{.48}
+\node[box,minimum width=2.4cm,text width=2.1cm,minimum height=.80cm,inner sep=4pt] (genencoder) at (5.2,5.60) {Encoder $h$};
+\node[box,minimum width=2.5cm,text width=2.2cm,minimum height=.80cm,inner sep=4pt] (generator) at (8.4,5.60) {Generate};
+\draw[arr] (3.45,5.60)--(genencoder.west);\draw[arr] (genencoder.east)--(generator.west);
+\node[inner sep=1.5pt] (genC1) at (11.80,5.40) {C};
+\node[inner sep=1.5pt] (genC2) at (12.85,5.75) {C};
+\node[inner sep=1.5pt] (genO) at (13.90,5.40) {O};
+\draw[ink,line width=.55pt] (genC1)--(genC2)--(genO);
+\draw[arr] (generator.east)--(10.90,5.60);
+\node[font=\figurefont,inner sep=0] at (12.80,4.58) {$G\sim p_\theta(G\mid h,F)$};
+
+\node[anchor=west,inner sep=0,tag] at (.75,4.24) {Retrieve};
+\spectrum{1.25}{2.77}{.48}
+\node[box,minimum width=2.4cm,text width=2.1cm,minimum height=.80cm,inner sep=4pt] (retencoder) at (5.2,3.35) {Pretrained $f$};
+\node[box,minimum width=2.5cm,text width=2.2cm,minimum height=.80cm,inner sep=4pt] (ranker) at (8.4,3.35) {Rank};
+\draw[arr] (3.45,3.35)--(retencoder.west);\draw[arr] (retencoder.east)--(ranker.west);
+\draw[arr] (ranker.east)--(10.75,3.35);
+\node[small,inner sep=0] at (13.0,4.05) {$\mathcal C(F)$};
+\foreach \x/\label/\name in {11.40/C/retA,12.02/C/retB,12.64/O/retC,13.45/C/retD,14.07/O/retE,14.69/C/retF}{
+ \node[small,inner sep=1pt] (\name) at (\x,3.35) {\label};}
+\draw[ink,line width=.55pt] (retA)--(retB)--(retC);\draw[ink,line width=.55pt] (retD)--(retE)--(retF);
+\node[small,inner sep=0] at (12.02,2.95) {$G_1$};\node[small,inner sep=0] at (14.07,2.95) {$G_2$};
+\draw[ink,line width=.55pt] (11.30,2.72)--(12.74,2.72);
+\node[font=\figurefont,inner sep=0] at (11.92,2.30) {$\widehat G=\arg\max\nolimits_{G\in\mathcal C(F)}s(f(S),G)$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

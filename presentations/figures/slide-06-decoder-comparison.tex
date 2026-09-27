@@ -1,0 +1,34 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 6; figure 05; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\node[font=\figurefont\bfseries\figurefont] at (4.05,6.5) {Graph diffusion};
+\node[font=\figurefont\bfseries\figurefont] at (11.85,6.5) {Autoregressive SMILES};
+\draw[line,line width=.55pt] (7.95,6.5)--(7.95,2.2);
+\node[inner sep=0,font=\figurefont] (noisymatrix) at (2.2,5.06) {$\begin{pmatrix}0&2&0\\2&0&1\\0&1&0\end{pmatrix}$};
+\node[inner sep=0,font=\figurefont] (cleanmatrix) at (5.9,5.06) {$\begin{pmatrix}0&1&0\\1&0&1\\0&1&0\end{pmatrix}$};
+\node[small,anchor=south,inner sep=0] at ([yshift=.14cm]noisymatrix.north) {$A_T$};
+\node[small,anchor=south,inner sep=0] at ([yshift=.14cm]cleanmatrix.north) {$A_0$};
+\draw[arr,shorten <=.18cm,shorten >=.18cm] (noisymatrix.east)--node[above,small]{$T\;\text{steps}$}(cleanmatrix.west);
+\node[small] at (4.05,4.18) {$i,j\in(\mathrm C,\mathrm C,\mathrm O)$};
+\foreach \x/\token/\index in {9.42/C/1,11.04/C/2,12.66/O/3,14.28/EOS/4}{
+ \node[box,minimum width=.9cm,minimum height=.8cm,inner sep=3pt] (comparison\index) at (\x,5.06) {\token};
+ \node[small] at (\x,5.98) {$s_{\index}$};
+}
+\foreach \i/\j in {1/2,2/3,3/4}{\draw[arr] (comparison\i.east)--(comparison\j.west);}
+\node[small] at (11.85,4.18) {Sequential sampling};
+\node[font=\figurefont] at (4.05,3.50) {$X=X(F)$};
+\node[small] at (4.05,3.04) {Fixed heavy atoms};
+\node[font=\figurefont] at (11.85,3.50) {$p(s\mid\hat f,F)=\prod_t p(s_t\mid s_{<t},\hat f,F)$};
+\node[small] at (11.85,3.04) {Explicit likelihood};
+\node[small] at (4.05,2.35) {Repeated global refinement};
+\node[small] at (11.85,2.35) {$\operatorname{formula}(s)\stackrel{?}{=}F$\quad Validate syntax + formula};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

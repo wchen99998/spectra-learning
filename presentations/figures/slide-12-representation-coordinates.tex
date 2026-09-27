@@ -1,0 +1,43 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 12; figure 12; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+% A fixed teacher defines the same scalar target for this one input.
+\node[small,anchor=base,inner sep=0] at (2.5,6.64) {Same spectrum $S$};
+\draw[muted,line width=.55pt] (1.42,5.80)--(3.55,5.80);
+\draw[muted,line width=.55pt] (1.42,5.80)--(1.42,6.48);
+\foreach \x/\h in {.16/.16,.36/.48,.58/.25,.82/.60,1.06/.19,1.27/.40,1.52/.22,1.81/.30,1.98/.16}{\draw[ink,line width=.55pt] (1.42+\x,5.80)--+(0,\h);}
+\node[tinytext,anchor=north,inner sep=1pt] at (2.49,5.73) {$m/z$ (Th; schematic)};
+\node[tinytext,rotate=90,inner sep=0] at (1.14,6.14) {$I/I_{\max}$};
+\node[box,minimum width=2.45cm,minimum height=.66cm,inner sep=4pt] (teacher) at (7.68,6.15) {Frozen teacher $T$};
+\draw[arr] (3.85,6.15)--(teacher.west);
+\node[small,anchor=base,inner sep=0] at (12.18,6.67) {Fixed target $Y$};
+\draw[ink,fill=soft,line width=.55pt] (11.73,5.80) rectangle (12.63,6.50);
+\node[font=\figurefont,inner sep=0] at (12.18,6.15) {$4$};
+\draw[arr] (teacher.east)--(11.58,6.15);
+% Two equally valid student/predictor factorizations, not a training sequence.
+\node[small,anchor=base,inner sep=0] at (2.77,5.01) {Student code $Z$};
+\node[small,anchor=base,inner sep=0] at (7.68,5.01) {Predictor $g$};
+\node[small,anchor=base,inner sep=0] at (12.18,5.01) {Prediction $\widehat Y$};
+\foreach \y/\name/\code/\operation in {4.34/A/2/{\times 2},3.11/B/8/{\div 2}}{
+ \node[small,anchor=west,inner sep=0] at (1.05,\y) {Code \name};
+ \draw[ink,fill=soft,line width=.55pt] (2.63,\y-.35) rectangle (3.53,\y+.35);
+ \node[font=\figurefont,inner sep=0] at (3.08,\y) {$\code$};
+ \node[box,minimum width=2.45cm,minimum height=.70cm,inner sep=4pt] (pred\name) at (7.68,\y) {$\operation$};
+ \draw[arr] (3.68,\y)--(pred\name.west);
+ \draw[ink,fill=soft,line width=.55pt] (11.73,\y-.35) rectangle (12.63,\y+.35);
+ \node[font=\figurefont,inner sep=0] at (12.18,\y) {$4$};
+ \draw[arr] (pred\name.east)--(11.58,\y);}
+\draw[muted,dashed,line width=.55pt] (12.80,6.15)--(13.45,6.15)--(13.45,3.11)--(12.80,3.11);
+\draw[muted,dashed,line width=.55pt] (12.80,4.34)--(13.45,4.34);
+\node[small,anchor=west,inner sep=0,align=left] at (13.73,4.69) {Both\\match};
+\node[anchor=base,inner sep=0,font=\figurefont] at (8.02,2.23) {$\widehat Y=g(Z),\qquad\mathcal L=\tfrac12(\widehat Y-Y)^2$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

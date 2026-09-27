@@ -1,0 +1,41 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 14; figure 14; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+% Explicit code coordinates: the predictor reads z_1 and ignores z_2.
+\node[small,anchor=base,inner sep=0] at (2.20,6.43) {Code $Z$};
+\draw[draw=ink,fill=soft,line width=.55pt] (1.60,5.25) rectangle (2.80,6.00);
+\draw[draw=ink,fill=paper,line width=.55pt] (1.60,4.50) rectangle (2.80,5.25);
+\node[anchor=east,inner sep=0,small] at (1.38,5.625) {$z_1$};
+\node[anchor=east,inner sep=0,small] at (1.38,4.875) {$z_2$};
+\node[font=\figurefont,inner sep=0] at (2.20,5.625) {$1$};
+\node[font=\figurefont,inner sep=0] at (2.20,4.875) {$5$};
+\node[anchor=base west,inner sep=0,small] at (.95,3.93) {No direct feedback to $z_2$};
+% Only the model operation is boxed. Forward and backward ports are separate.
+\node[box,text width=2.55cm,inner xsep=4pt,minimum height=.95cm] (predictor) at (5.70,5.625) {$g(Z)=2z_1$};
+\node[small,anchor=base,inner sep=0] at (5.70,6.43) {Predictor};
+\draw[arr] (2.80,5.83)--(predictor.west |- 0,5.83);
+\draw[arr] (predictor.west |- 0,5.40)--(2.80,5.40);
+\node[anchor=base,inner sep=0,font=\figurefont] at (3.54,5.04) {$-4$};
+% Numerical comparison of the prediction with the fixed teacher target.
+\node[font=\figurefont,inner sep=3pt] (prediction) at (9.15,5.625) {$2$};
+\node[font=\figurefont,inner sep=3pt] at (10.28,5.625) {$-$};
+\node[font=\figurefont,inner sep=3pt] at (11.40,5.625) {$4$};
+\node[font=\figurefont,inner sep=3pt] at (12.60,5.625) {$=$};
+\node[font=\figurefont,inner sep=3pt] (error) at (14.00,5.625) {$-2$};
+\node[small,anchor=base,inner sep=0] at (9.15,6.43) {Prediction};
+\node[small,anchor=base,inner sep=0] at (11.40,6.43) {Fixed teacher};
+\node[small,anchor=base,inner sep=0] at (14.00,6.43) {Error};
+\draw[arr] (predictor.east)--(prediction.west);
+\draw[arr] (error.south)--(14.00,4.20)--node[above=4pt,small]{error feedback}(5.70,4.20)--(predictor.south);
+\node[anchor=base west,inner sep=0,font=\figurefont] at (1.05,2.64) {$\displaystyle\frac{\partial\mathcal L}{\partial z_1}=2(2-4)=-4,\qquad\frac{\partial\mathcal L}{\partial z_2}=0$};
+\node[anchor=west,inner sep=0,align=left,small] at (10.0,2.90) {To reduce the error:\\increase $z_1$.};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

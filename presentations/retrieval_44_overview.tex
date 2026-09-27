@@ -1,0 +1,151 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage{novogaia-theme}
+\tikzset{every node/.style={font=\figurefont\fontsize{8}{10}\selectfont,text=ink},small/.style={font=\figurefont\fontsize{7.2}{9}\selectfont},tag/.style={font=\figurefont\fontsize{7.2}{9}\selectfont,text=muted}}
+\title{The 44.10 percent retrieval recipe — overview}
+\author{Wuhao / Novogaia}
+\date{24 September 2026}
+\hypersetup{pdftitle={Novogaia — 44.10 percent retrieval, four-slide overview},pdfsubject={A general overview of the new candidate matching and training methods}}
+
+\newcommand{\ovtext}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm] at (#1,#2) {#4};}
+\newcommand{\ovtag}[3]{\node[anchor=west,inner sep=0,tag] at (#1,#2) {#3};}
+
+\begin{document}
+
+% 01: retain the encoders; explain the change at the point where they meet.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{GENERAL OVERVIEW / THE 44.10\% RECIPE}{Better matching between spectra and candidates}
+\ovtag{.98}{6.64}{RETAINED REPRESENTATIONS}
+\ovtag{8.11}{6.64}{NEW MATCHING}
+\ovtag{12.80}{6.64}{RETRIEVAL}
+
+\spectrum{1.17}{5.18}{.36}
+\node[box,text width=2.48cm,minimum height=1.0cm] (ovJepa) at (5.13,5.66) {JEPA encoder\\Peak tokens};
+\draw[arr] (2.84,5.66)--(ovJepa.west);
+\molecule{1.90}{3.30}{.35}
+\node[box,text width=2.48cm,minimum height=1.12cm] (ovGraph) at (5.13,3.43) {GINE + global\\GLACIER tokens};
+\draw[arr] (2.55,3.43)--(ovGraph.west);
+
+\node[box,fill=soft,text width=2.63cm,minimum height=1.90cm,inner sep=7pt] (ovMatch) at (9.73,4.62)
+ {Ion compatibility\\[5pt]Candidate cross-attention\\[5pt]Gated evidence aggregation};
+\draw[arr] (ovJepa.east)--(7.54,5.66)--(7.54,5.10)--(ovMatch.west |- 7.54,5.10);
+\draw[arr] (ovGraph.east)--(7.54,3.43)--(7.54,4.14)--(ovMatch.west |- 7.54,4.14);
+\draw[arr] (ovMatch.east)--(12.29,4.62);
+
+\foreach \yy/\rank/\tone/\w in {5.44/1/100/1.38,4.61/2/45/.96,3.78/3/25/.61}{
+ \node[anchor=west,inner sep=0,small] at (12.58,\yy) {\rank};
+ \fill[ink!\tone] (13.03,\yy-.10) rectangle +(\w,.20);
+}
+\node[small,align=center,text width=2.80cm] at (13.66,2.81) {One score for each\\formula candidate};
+
+\takeaway{The main changes target how the model compares plausible molecular candidates.}
+\source{General overview of docs/retrieval\_recipe.md. Global context and GLACIER fragments were already present in the prior approach. Spectrum, molecule and ranking bars are illustrative.}
+\end{tikzpicture}
+\end{frame}
+
+% 02: three parts of one score, with simple diagrams rather than equations.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{NEW MATCHING / THREE COMPLEMENTARY IDEAS}{Use mass evidence, candidate context and fragment relevance}
+\node[font=\brandmedium\fontsize{11}{13}\selectfont] at (3.03,6.52) {Ion compatibility};
+\node[font=\brandmedium\fontsize{11}{13}\selectfont] at (8.08,6.52) {Candidate context};
+\node[font=\brandmedium\fontsize{11}{13}\selectfont] at (13.05,6.52) {Evidence aggregation};
+
+% Observed peak positions and candidate-derived ion positions.
+\draw[muted,line width=.55pt] (1.36,4.65)--(4.67,4.65);
+\foreach \xx/\hh in {1.58/.22,1.91/.65,2.25/.35,2.64/1.16,3.02/.49,3.56/.91,3.98/.28,4.36/.52}{
+ \draw[ink,line width=1.2pt] (\xx,4.65)--+(0,\hh);
+}
+\foreach \xx in {1.91,2.64,3.56}{
+ \draw[muted,dashed,line width=.8pt] (\xx,4.42)--(\xx,5.99);
+ \draw[ink,line width=.7pt] (\xx-.07,4.30)--(\xx,4.42)--(\xx+.07,4.30);
+}
+\node[anchor=north,small,align=center] at (3.02,4.10) {Observed peak m/z\\Candidate-fragment ion masses};
+\node[anchor=north,align=center,text width=4.25cm] at (3.03,3.10) {Give chemically plausible\\peak--fragment matches a bonus.};
+
+% Candidate fragments send a combined context back to a peak representation.
+\foreach \xx/\tone in {6.57/20,7.19/55,7.81/90,8.43/35,9.05/70}{
+ \filldraw[draw=ink,line width=.5pt,fill=ink!\tone] (\xx,5.54) rectangle +(.32,.43);
+ \draw[thinarr] (\xx+.16,5.40)--(7.98,4.77);
+}
+\node[box,minimum width=2.50cm,minimum height=.68cm,inner sep=4pt] at (8.00,4.39) {Peak + candidate context};
+\node[anchor=north,align=center,text width=4.25cm] at (8.08,3.10) {The candidate's fragments\\change each local match.};
+
+% Different fragment weights feed a single score; arbitrary illustration.
+\foreach \yy/\ww/\tone in {5.87/1.04/85,5.34/.43/35,4.81/.75/60,4.28/.29/25}{
+ \draw[ink,line width=.55pt] (11.55,\yy-.12) rectangle +(.28,.24);
+ \fill[ink!\tone] (12.05,\yy-.09) rectangle +(\ww,.18);
+ \draw[muted,line width=.55pt] (13.33,\yy)--(13.56,\yy);
+}
+\draw[ink,line width=.65pt] (13.56,4.28)--(13.56,5.87);
+\draw[arr] (13.56,5.08)--(14.11,5.08);
+\node[circle,draw=ink,fill=soft,minimum size=.78cm,inner sep=2pt] at (14.59,5.08) {Score};
+\node[anchor=north,align=center,text width=4.25cm] at (13.05,3.10) {Learn which fragments matter;\\combine both matching directions.};
+
+\takeaway{These three ingredients work inside the same spectrum--molecule score.}
+\source{Ion matching uses observed peak m/z, the supplied adduct, and masses derived from each candidate's proposed fragments. Fragment intensity enters only its learned gate. Diagram values are illustrative; no individual component's causal gain is claimed.}
+\end{tikzpicture}
+\end{frame}
+
+% 03: the number scored stays eight; the support expands across the pool.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{NEW TRAINING / CANDIDATE DISCRIMINATION}{Eight negatives, drawn from a much broader pool}
+\node[font=\brandmedium\fontsize{12}{14}\selectfont] at (3.72,6.58) {Previously};
+\node[font=\brandmedium\fontsize{12}{14}\selectfont] at (12.02,6.58) {Now};
+\node[tag] at (3.72,6.05) {First 16 eligible candidates};
+\node[tag] at (12.02,6.05) {The entire eligible candidate pool};
+
+\foreach \rr in {0,...,5}{\foreach \cc in {0,...,7}{
+ \pgfmathsetmacro{\py}{5.37-\rr*.40}
+ \pgfmathsetmacro{\px}{2.17+\cc*.40}
+ \ifnum\rr<2
+  \filldraw[draw=muted,line width=.5pt,fill=soft] (\px,\py) rectangle +(.29,.29);
+ \else
+  \draw[line,line width=.45pt] (\px,\py) rectangle +(.29,.29);
+ \fi
+ \pgfmathsetmacro{\qx}{10.47+\cc*.40}
+ \filldraw[draw=muted,line width=.5pt,fill=soft] (\qx,\py) rectangle +(.29,.29);
+}}
+\foreach \rr/\cc in {0/0,0/2,0/4,0/6,1/1,1/3,1/5,1/7}{
+ \fill[ink] (2.17+\cc*.40,5.37-\rr*.40) rectangle +(.29,.29);
+}
+\foreach \rr/\cc in {0/1,0/6,1/3,2/0,2/7,3/4,4/2,5/6}{
+ \fill[ink] (10.47+\cc*.40,5.37-\rr*.40) rectangle +(.29,.29);
+}
+\draw[ink,line width=.6pt,dashed] (1.97,4.84) rectangle (5.46,5.84);
+\draw[arr,line width=1.0pt] (6.56,4.59)--(9.13,4.59);
+\node[small,align=center] at (7.85,5.29) {Keep the budget.\\Expand the coverage.};
+
+\node[anchor=north,align=center,text width=5.60cm] at (3.72,2.92) {Eight draws from one fixed short list.};
+\node[anchor=north,align=center,text width=5.60cm] at (12.02,2.92) {Eight fresh draws from all eligible candidates.};
+\fill[ink] (5.08,2.23) rectangle +(.16,.16);
+\node[anchor=west,inner sep=0,small] at (5.42,2.31) {Selected negative on this training visit};
+
+\takeaway{Training can encounter candidates that the old fixed bank never exposed.}
+\source{Uniform sampling without replacement, refreshed on each visit; exact truth SMILES excluded. Eight formula negatives per spectrum are unchanged; in-batch negatives remain. Schematic pool sizes shown. This is sampled training, not full-pool cross-entropy.}
+\end{tikzpicture}
+\end{frame}
+
+% 04: the two training phases and separate validation/test labels.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{TRAINING + RESULT / THE COMBINED RECIPE}{Train the new head, then adapt it with JEPA}
+\node[box,text width=4.52cm,minimum height=1.38cm,inner sep=7pt] (ovHead) at (4.11,5.64)
+ {\textbf{1\quad Fresh retrieval head}\\[6pt]Freeze JEPA; learn the new matching model.};
+\node[box,fill=soft,text width=4.52cm,minimum height=1.38cm,inner sep=7pt] (ovJoint) at (11.93,5.64)
+ {\textbf{2\quad Joint adaptation}\\[6pt]Continue with the trained head and JEPA.};
+\draw[arr] (ovHead.east)--(ovJoint.west);
+\draw[line,line width=.5pt] (.98,4.33)--(15.02,4.33);
+
+\node[anchor=base,font=\brandmedium\fontsize{35}{37}\selectfont] at (4.13,3.16) {46.02\%};
+\node[anchor=base,font=\brandmedium\fontsize{35}{37}\selectfont] at (11.96,3.16) {44.10\%};
+\node[align=center,text width=5.50cm] at (4.13,2.56) {Validation Hit@1\\Checkpoint selected on 5,000 spectra};
+\node[align=center,text width=5.50cm] at (11.96,2.56) {Held-out test Hit@1\\7,743 / 17,556 spectra};
+
+\takeaway{44.10\% is the held-out result for the complete recipe; the validation metric is separate.}
+\source{Fixed validation selection, full supplied test pools and spectrum weighting. Matched head-only continuation reached 45.94\% validation versus 46.02\% with joint adaptation: four spectra, one seed. This does not establish finetuning as the main source of the improvement.}
+\end{tikzpicture}
+\end{frame}
+
+\end{document}

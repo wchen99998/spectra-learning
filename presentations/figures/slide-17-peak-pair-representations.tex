@@ -1,0 +1,29 @@
+% Editable standalone vector figure extracted from novogaia_spectra.tex.
+% Source slide 17; figure 16; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\node[anchor=base west,inner sep=0,small] at (1.05,6.4) {Single states $h_i$};
+\foreach \i/\mass in {0/100,1/118,2/144,3/162}{
+ \node[small] at (1.4,5.55-\i*.74) {\mass};
+ \draw[fill=ink!20,draw=ink] (2.12,5.35-\i*.74) rectangle +(2.25,.4);}
+\node[anchor=base,inner sep=0,small] at (1.4,2.77) {$m/z$ (Th)};
+\draw[decorate,decoration={brace,amplitude=4pt},line width=.55pt] (4.61,5.55)--node[right=5pt,small]{$18$ Th}(4.61,4.81);
+\draw[decorate,decoration={brace,amplitude=4pt},line width=.55pt] (4.61,4.07)--node[right=5pt,small]{$18$ Th}(4.61,3.33);
+\draw[arr] (5.88,4.45)--(7.13,4.45);
+\node[anchor=base,inner sep=0,small] at (8.7,6.4) {Pair states $Z_{ij}$};
+\foreach \i in {0,...,3}{\foreach \j in {0,...,3}{\draw[draw=line,fill=soft,line width=.55pt] (7.4+\j*.64,3.2+\i*.64) rectangle +(.55,.55);}}
+\node[anchor=base,inner sep=0,small] at (8.635,5.95) {$j$};
+\node[anchor=east,inner sep=0,small] at (7.16,5.4) {$i$};
+\draw[ink,line width=.55pt] (8.04,5.12) rectangle +(.55,.55);
+\draw[arr] (10.13,4.45)--(10.9,4.45);
+\node[anchor=west,inner sep=0,font=\figurefont] at (11.1,4.45) {$\begin{aligned}Z_{ij}=\phi(&m_i-m_j,\\ &I_i,I_j,\ldots)\end{aligned}$};
+\node[anchor=base west,inner sep=0,font=\figurefont] at (1.05,2.26) {$N\times d_s\quad\longrightarrow\quad N\times N\times d_p$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

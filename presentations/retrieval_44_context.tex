@@ -1,0 +1,126 @@
+% Two editable diagram frames; loaded by retrieval_44.tex.
+% All coordinates share novogaia-theme's 16 x 9 cm page grid.
+
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{RETAINED FOUNDATION / MOLECULAR CONTEXT}{Whole-molecule context reaches every atom}
+\node[anchor=west,inner sep=0,tag] at (.95,6.60) {THREE LOCAL GINE UPDATES};
+\node[anchor=west,inner sep=0,tag] at (5.65,6.60) {ONE SUMMARY OF ALL REAL ATOMS};
+\node[anchor=west,inner sep=0,tag] at (11.50,6.60) {BROADCAST + RESIDUAL};
+
+% Illustrative molecular connectivity, carrying the three-layer atom states.
+\begin{scope}[shift={(2.45,4.75)}]
+ \coordinate (ctxA) at (-1.10,.05);
+ \coordinate (ctxB) at (-.55,.73);
+ \coordinate (ctxC) at (.28,.73);
+ \coordinate (ctxD) at (.83,.05);
+ \coordinate (ctxE) at (.28,-.63);
+ \coordinate (ctxF) at (-.55,-.63);
+ \coordinate (ctxG) at (1.62,.05);
+ \coordinate (ctxH) at (1.99,.73);
+ \draw[ink,line width=1pt] (ctxA)--(ctxB)--(ctxC)--(ctxD)--(ctxE)--(ctxF)--cycle (ctxD)--(ctxG)--(ctxH);
+ \foreach \n/\i in {A/1,B/2,C/3,D/4,E/5,F/6,G/7,H/8}{
+  \node[circle,draw=ink,fill=paper,line width=.75pt,minimum size=.42cm,inner sep=0,font=\fontsize{8}{9}\selectfont] at (ctx\n) {$h_{\i}^{3}$};
+ }
+\end{scope}
+\node[anchor=north,align=center,small,text width=3.55cm] at (2.65,3.57) {Local atom states $\cdot$ 496D};
+
+\node[box,minimum width=3.30cm,minimum height=.88cm] (ctxMean) at (7.32,5.50) {Masked mean over atoms};
+\node[box,minimum width=3.30cm,minimum height=.88cm] (ctxMlp) at (7.32,4.12) {496D $\to$ ReLU $\to$ 496D};
+\draw[arr] (4.72,5.50)--(ctxMean.west);
+\draw[arr] (ctxMean.south)--node[right,small] {$\bar h_G$}(ctxMlp.north);
+\node[anchor=north,align=center,small,text width=3.7cm] at (7.32,3.45) {All real atoms; padding excluded.};
+
+% A common g_G enters each residual sum; local states stay atom-specific.
+\coordinate (ctxBroadcast) at (10.75,4.12);
+\draw[arr] (ctxMlp.east)--node[above,small] {$g_G$}(ctxBroadcast);
+\draw[ink,line width=.65pt] (10.75,3.70)--(10.75,5.85);
+\foreach \yy/\tok/\lab in {5.85/a/1,5.10/b/2,3.70/c/{|V_G|}}{
+ \node[box,minimum width=2.85cm,minimum height=.59cm,inner sep=3pt] (ctxToken\tok) at (13.48,\yy) {$\tilde h_{\lab}=h_{\lab}^{3}+g_G$};
+ \draw[thinarr] (10.75,\yy)--(ctxToken\tok.west);
+}
+\node[font=\fontsize{15}{16}\selectfont] at (13.48,4.44) {$\vdots$};
+
+\node[anchor=west,inner sep=0,font=\fontsize{11}{13}\selectfont] at (1.08,2.54)
+ {$\displaystyle \tilde h_a=h_a^3+\operatorname{MLP}\!\left(\operatorname{mean}_{u\in V_G} h_u^3\right)$};
+\node[anchor=west,align=left,small,text width=5.30cm] at (9.75,2.58) {A pooled summary does not guarantee\\a unique graph representation.};
+\takeaway{Each atom carries local connectivity plus a learned whole-molecule summary.}
+\source{Selected recipe: docs/retrieval\_recipe.md, molecular encoder and global context. This component was already present in the earlier Global + GLACIER model. Graph is illustrative; no 3D coordinates are used.}
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{RETAINED FOUNDATION / GLACIER FRAGMENTS}{Fragments turn atoms into retrieval evidence}
+\node[anchor=west,inner sep=0,tag] at (.95,6.60) {FIXED PROPOSED ATOM SETS};
+\node[anchor=west,inner sep=0,tag] at (7.05,6.60) {POOL LEARNED ATOM STATES};
+\node[anchor=west,inner sep=0,tag] at (12.05,6.60) {TRAINABLE READOUT};
+
+% The same toy graph in three views: intact, ring membership, tail membership.
+% Solid circles are members. A second outline marks a member on the cut boundary.
+\foreach \xx/\which/\caption in {1.45/0/{Intact anchor},3.55/1/{Fragment 1},5.65/2/{Fragment 2}}{
+ \begin{scope}[shift={(\xx,5.47)},scale=.68]
+  \coordinate (frA) at (-.60,0);
+  \coordinate (frB) at (-.30,.52);
+  \coordinate (frC) at (.30,.52);
+  \coordinate (frD) at (.60,0);
+  \coordinate (frE) at (.30,-.52);
+  \coordinate (frF) at (-.30,-.52);
+  \coordinate (frG) at (1.15,0);
+  \coordinate (frH) at (1.70,.35);
+  \draw[line,line width=1.25pt] (frA)--(frB)--(frC)--(frD)--(frE)--(frF)--cycle (frD)--(frG)--(frH);
+  \foreach \n in {A,B,C,D,E,F,G,H}{\fill[soft] (fr\n) circle (.10);}
+  \ifnum\which=0
+   \draw[ink,line width=1.1pt] (frA)--(frB)--(frC)--(frD)--(frE)--(frF)--cycle (frD)--(frG)--(frH);
+   \foreach \n in {A,B,C,D,E,F,G,H}{\fill[ink] (fr\n) circle (.10);}
+  \fi
+  \ifnum\which=1
+   \draw[ink,line width=1.1pt] (frA)--(frB)--(frC)--(frD)--(frE)--(frF)--cycle;
+   \foreach \n in {A,B,C,D,E,F}{\fill[ink] (fr\n) circle (.10);}
+   \draw[ink,line width=.65pt] (frD) circle (.17);
+   \draw[muted,dashed,line width=.8pt] (.86,-.24)--(.86,.24);
+  \fi
+  \ifnum\which=2
+   \draw[ink,line width=1.1pt] (frD)--(frG)--(frH);
+   \foreach \n in {D,G,H}{\fill[ink] (fr\n) circle (.10);}
+   \draw[ink,line width=.65pt] (frD) circle (.17);
+   \draw[muted,dashed,line width=.8pt] (.19,.03)--(.65,.29) (.19,-.03)--(.65,-.29);
+  \fi
+ \end{scope}
+ \node[anchor=north,small] at (\xx+.35,4.88) {\caption};
+}
+\draw[arr] (6.94,5.47)--(7.37,5.47);
+
+\node[box,minimum width=3.46cm,text width=2.98cm,minimum height=1.85cm,align=left,inner sep=5pt,font=\figurefont\fontsize{7.3}{9.0}\selectfont] (frFeatures) at (9.14,5.24)
+ {Member-state mean\\[3pt]
+  Boundary-state mean\\[4pt]
+  Cut + kind embeddings\\[3pt]
+  Mass fraction + $\log|V_f|$};
+\node[anchor=north,small] at (9.14,4.14) {$c_f\in\mathbb R^{1010}$};
+
+\node[box,minimum width=3.02cm,text width=2.55cm,minimum height=1.14cm,inner sep=5pt,font=\figurefont\fontsize{7.5}{9.0}\selectfont] (frVector) at (13.63,5.42)
+ {MLP + unit normalization\\[4pt]256D fragment token $z_f$};
+\node[box,minimum width=3.02cm,text width=2.55cm,minimum height=1.14cm,inner sep=5pt,font=\figurefont\fontsize{7.5}{9.0}\selectfont] (frGate) at (13.63,3.60)
+ {Linear gate + softmax\\[4pt]Fragment prior $\pi_f$};
+\draw[ink,line width=.65pt] (frFeatures.east)--(11.46,5.24);
+\draw[arr] (11.46,5.24)|-(frVector.west);
+\draw[arr] (11.46,5.24)|-(frGate.west);
+\node[anchor=west,small,inner sep=0] at (8.11,2.78) {Predicted intensity $I_f$};
+\draw[arr] (10.97,2.80)--(13.63,2.80)--(frGate.south);
+
+% Semantic legend and the boundary definition keep the fragment drawings honest.
+\fill[ink] (1.06,4.00) circle (.064);
+\node[anchor=west,small,inner sep=0] at (1.23,4.00) {Member atom};
+\fill[ink] (3.19,4.00) circle (.064);
+\draw[ink,line width=.65pt] (3.19,4.00) circle (.112);
+\node[anchor=west,small,inner sep=0] at (3.39,4.00) {Boundary member};
+\fill[soft] (5.81,4.00) circle (.064);
+\node[anchor=west,small,inner sep=0] at (5.98,4.00) {Outside};
+\node[anchor=north west,align=left,small,text width=6.00cm,inner sep=0] at (.95,3.35)
+ {Boundary members touch a cut bond.\\An empty boundary pools to zero.};
+\node[anchor=north west,align=left,small,text width=6.00cm,inner sep=0] at (.95,2.43)
+ {Up to 128 tokens, including the intact anchor.};
+\takeaway{Fragments pool member and cut-boundary context; predicted intensity enters only their gate.}
+\source{Selected recipe: docs/retrieval\_recipe.md, learned fragment representation. Membership drawings are illustrative, not measured or actual GLACIER proposals. Atom states come from the intact graph; there is no separate subgraph GNN or frozen fingerprint readout.}
+\end{tikzpicture}
+\end{frame}
