@@ -1,0 +1,9 @@
+{
+  "input_root": "/results/jepa_fps_ftjepa_1p8b_step1190000_flare_raw",
+  "prepared": "/results/atom_flare_gine3m_qk_fullpool8_s0_20260918/prepared",
+  "fragments": "/results/global_glacier_fullpool_prepared_20260923/fragments",
+  "peak_fractions": "/results/jepa_fps_ftjepa_1p8b_step530500_upstream_agreement/cache/peak_retained_fraction_f32.npy",
+  "jepa_checkpoint": "/results/checkpoints/ftjepa_1p8b_step1190000/snapshot",
+  "jepa_metadata": "/results/checkpoints/ftjepa_1p8b_step1190000/metadata/metadata",
+  "jepa_data": "/results/massspecgym_maccs_mz_order_metadata_n128_v2"
+}

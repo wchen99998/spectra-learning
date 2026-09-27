@@ -1,9 +1,14 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from spectra_learning.data.massspec_probe import MassSpecProbeData
+if TYPE_CHECKING:
+    from spectra_learning.data.massspec_probe import MassSpecProbeData
 
 
 def __getattr__(name: str) -> Any:
+    if name == "MassSpecProbeData":
+        from spectra_learning.data.massspec_probe import MassSpecProbeData
+
+        return MassSpecProbeData
     if name == "run_msg_probe":
         from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 

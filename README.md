@@ -32,7 +32,7 @@ cfg.nist_murcko_probe_include_dreams_auxiliary = False
 
 ## Training Entry Points
 
-`train.py` is the only model-training dispatcher. It supports PyTorch or JAX
+`train.py` is the pretraining dispatcher. It supports PyTorch or JAX
 pretraining, PyTorch contrastive training, and JAX AR training. Unsupported
 task/backend combinations fail before a trainer is imported.
 
@@ -486,3 +486,25 @@ Additional `test-tpu` debug notes from 2026-06-17:
   named checkpoint tags for the PairMixer triangle projection/gate outputs,
   triangle update projection, attention `qkv`/pair-bias outputs, and MLP
   activations; do not treat the current `selective` mode as MaxText `minimal`.
+
+
+## Molecular retrieval
+
+The supported MassSpecGym formula-candidate pipeline is the JAX **Global GINE +
+GLACIER + fragment cross-attention** recipe, followed by joint JEPA adaptation.
+The selected checkpoint achieved **46.02% validation Hit@1** and **44.10% held-out
+test Hit@1** over 17,556 spectra (median rank 2).
+
+See [the complete recipe and results](docs/retrieval_recipe.md) for the mathematics,
+changes from the earlier GINE model, pinned inputs, checkpoint identity and MCES.
+`scripts/run_retrieval_jax.py` is the retrieval entrypoint; its `head`, `joint` and
+`eval` stages fix the architecture and optimization settings. Configure only input
+locations in `configs/retrieval_4602.json`.
+
+```bash
+.venv/bin/python scripts/run_retrieval_jax.py --inputs configs/retrieval_4602.json --stage eval --out /results/retrieval_selected_4602_20260924/run
+```
+
+The mounted `/results` data and selected checkpoint are also available through
+`scripts/modal_retrieval_jax.py` on the existing Modal volume. Historical FLARE
+method documents describe archived experiments; they are not active pipeline options.
