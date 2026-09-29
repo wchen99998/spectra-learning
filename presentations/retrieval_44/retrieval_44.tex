@@ -1,0 +1,317 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage{presentation-theme}
+\tikzset{every node/.style={font=\figurefont\fontsize{8}{10}\selectfont,text=ink},small/.style={font=\figurefont\fontsize{7.2}{9}\selectfont},tag/.style={font=\figurefont\fontsize{7.2}{9}\selectfont,text=muted}}
+\title{From fragment matching to candidate-aware retrieval}
+\author{Wuhao}
+\date{24 September 2026}
+\hypersetup{pdftitle={the 44.10 percent retrieval recipe},pdfsubject={Changes from the previous retrieval approach; validated full-test results}}
+
+% All matrix shading is synthetic. No heatmap depicts measured activations.
+\newcommand{\rheat}[4]{\begin{scope}[shift={(#1,#2)},scale=#3]
+ \foreach \r in {0,...,4}{\foreach \c in {0,...,5}{
+  \pgfmathtruncatemacro{\tone}{ifthenelse(mod(2*\r+1,6)==\c,82,10+mod(\r+2*\c+#4,5)*9)}
+  \fill[ink!\tone] (\c*.38,\r*.38) rectangle +(.34,.34);
+ }}\end{scope}}
+\newcommand{\rlabel}[3]{\node[anchor=west,inner sep=0,tag] at (#1,#2) {#3};}
+\newcommand{\rtext}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm] at (#1,#2) {#4};}
+\newcommand{\rmath}[3]{\node[anchor=west,inner sep=0,font=\fontsize{11}{14}\selectfont] at (#1,#2) {$\displaystyle #3$};}
+
+\begin{document}
+
+% 01 — the held-out result, with the validation/test distinction on the page.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{RETRIEVAL / 24 SEP 2026}{}
+\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{25}{28}\selectfont,text width=9.2cm,align=left] at (.75,7.30) {Candidate-aware\\molecular retrieval};
+\rtext{.80}{4.65}{7.9}{Global GINE + GLACIER fragments\\Ion-aware scoring + learned cross-attention}
+\node[anchor=base west,inner sep=0,font=\brandmedium\fontsize{44}{46}\selectfont] at (10.03,5.13) {44.10\%};
+\rlabel{10.12}{4.58}{Full-test Hit@1}
+\rlabel{10.12}{4.12}{7,743 / 17,556 spectra}
+\draw[line] (.75,3.58)--(15.25,3.58);
+\spectrum{1.14}{2.14}{.43}
+\draw[arr] (3.05,2.49)--(4.08,2.49);
+\peaktokens{4.50}{2.19}{soft}
+\draw[arr] (6.79,2.49)--(7.62,2.49);
+\rheat{8.03}{2.02}{.58}{1}
+\draw[arr] (9.56,2.49)--(10.58,2.49);
+\molecule{11.45}{2.44}{.31}
+\rtext{12.40}{2.97}{2.8}{Rank the supplied\\formula candidates}
+\source{One validation-selected checkpoint. Validation Hit@1: 46.02\%. Test: full supplied pools; spectrum weighting. All explanatory spectra, molecules and matrices are schematic.}
+\end{tikzpicture}
+\end{frame}
+
+% 02 — history is not an ablation or a comparison of validation to test.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{01 / WHAT CHANGED}{From the previous 36.94\% deck to 44.10\%}
+\rlabel{.92}{6.64}{Full-test Hit@1 (\%)}
+\foreach \v in {0,10,20,30,40,50}{
+ \draw[muted,line width=.45pt] (1.02,3.13+\v*.061)--(1.12,3.13+\v*.061);
+ \node[anchor=east,inner sep=0,small] at (.95,3.13+\v*.061) {\v};}
+\draw[muted,line width=.45pt] (1.12,3.13)--(9.08,3.13);
+\foreach \x/\v/\tone in {2.32/32.4732/30,5.10/36.9446/52,7.88/44.1046/100}{
+ \fill[ink!\tone] (\x-.65,3.13) rectangle (\x+.65,3.13+\v*.061);
+ \node[anchor=south,inner sep=0,font=\brandmedium\fontsize{14}{16}\selectfont] at (\x,3.29+\v*.061) {\pgfmathprintnumber[fixed,precision=2]{\v}\%};}
+\node[small,align=center] at (2.32,2.68) {Wider GINE\\+ Q/K};
+\node[small,align=center] at (5.10,2.68) {Global context\\+ GLACIER};
+\node[small,align=center] at (7.88,2.68) {Selected\\candidate-aware model};
+\draw[line] (9.52,2.50)--(9.52,6.66);
+\rtext{10.00}{6.50}{5.0}{\textbf{New since the previous deck}}
+\rtext{10.00}{5.88}{4.9}{Full-pool negative sampling}
+\rtext{10.00}{5.25}{4.9}{Ion-aware log-mixture scoring}
+\rtext{10.00}{4.62}{4.9}{32D candidate cross-attention}
+\rtext{10.00}{3.99}{4.9}{Joint JEPA / head adaptation}
+\rtext{10.00}{2.92}{4.9}{\textbf{+7.16 percentage points}\\versus the previous deck}
+\takeaway{Global context and fragments are retained; candidate discrimination is the new focus.}
+\source{All three bars: 17,556 test spectra, original supplied formula pools. Historical combined recipes, one seed each; these are not isolated ablations. Earlier wider GINE already used raw-token MLP and Q/K.}
+\end{tikzpicture}
+\end{frame}
+
+% 03 — operations in boxes; token arrays are data, not model blocks.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{02 / THE COMPLETE MODEL}{Two encoders meet in one candidate score}
+\rlabel{.88}{6.71}{SPECTRUM}
+\spectrum{1.12}{5.15}{.41}
+\node[box,text width=2.00cm,minimum height=.83cm] (je) at (4.85,5.65) {JEPA student\\step 1,190,000};
+\node[box,text width=2.10cm,minimum height=.83cm] (pe) at (7.74,5.65) {Learned peak MLP\\$2048\to256$};
+\draw[arr] (2.90,5.65)--(je.west);\draw[arr] (je.east)--(pe.west);
+\node[inner sep=0,font=\fontsize{14}{16}\selectfont] (q) at (10.16,5.65) {$Q=PW_Q$};
+\draw[arr,shorten >=.10cm] (pe.east)--(q.west);
+\rlabel{.88}{4.11}{MOLECULE}
+\molecule{1.65}{3.13}{.40}
+\node[box,text width=1.42cm,minimum height=.90cm] (gn) at (4.16,3.32) {GINE\\3 layers};
+\node[box,text width=1.46cm,minimum height=.90cm] (gl) at (6.62,3.32) {Global\\context};
+\node[box,text width=1.65cm,minimum height=.90cm] (fr) at (9.13,3.32) {GLACIER\\pooling};
+\draw[arr] (2.28,3.32)--(gn.west);\draw[arr] (gn.east)--(gl.west);\draw[arr] (gl.east)--(fr.west);
+\node[inner sep=0,font=\fontsize{12}{14}\selectfont] (k) at (11.33,3.32) {$K=ZW_K$};
+\draw[arr] (fr.east)--(k.west);
+\node[box,text width=2.05cm,minimum height=1.34cm] (sc) at (13.92,5.09) {Compatibility\\+ cross-attention\\+ reductions};
+\draw[arr] (q.east)--(12.18,5.65)--(12.18,5.45)--(sc.west |- 12.18,5.45);\draw[arr] (k.north)--(11.33,4.77)--(sc.west |- 11.33,4.77);
+\node[inner sep=0,font=\fontsize{15}{18}\selectfont] at (13.92,3.23) {$F(s,G)$};
+\draw[arr] (sc.south)--(13.92,3.64);
+\rlabel{3.49}{4.70}{127 physical peak tokens; no CLS readout, no PCA}
+\rlabel{3.49}{2.38}{All atoms $\to$ up to 128 learned fragment tokens}
+\takeaway{The same JEPA initialization; richer matching and a jointly adapted final encoder.}
+\source{Selected recipe: pure JAX/Flax retrieval training, direct loops. The independent GLACIER proposal model runs offline; its fragment memberships remain fixed. No pair-stream encoder is used.}
+\end{tikzpicture}
+\end{frame}
+
+\input{retrieval_44_context.tex}
+
+% 06 — explain the physically meaningful compatibility matrix.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{03 / NEW MATCHING}{Learned similarity meets precise ion evidence}
+\node[font=\brandmedium\fontsize{12}{15}\selectfont] at (3.04,6.53) {Learned similarity};
+\node[font=\brandmedium\fontsize{12}{15}\selectfont] at (8.17,6.53) {Ion compatibility};
+\node[font=\brandmedium\fontsize{12}{15}\selectfont] at (13.00,6.53) {Base matrix};
+\rheat{1.55}{3.78}{1.30}{0}
+\rheat{6.64}{3.78}{1.30}{2}
+\rheat{11.52}{3.78}{1.30}{4}
+\node[font=\fontsize{26}{28}\selectfont] at (5.39,5.10) {$+$};
+\node[font=\fontsize{26}{28}\selectfont] at (10.43,5.10) {$=$};
+\node[small,rotate=90] at (1.12,5.15) {physical peaks $p$};
+\node[small] at (3.04,3.46) {candidate fragments $f$};
+\node[font=\fontsize{14}{17}\selectfont] at (3.04,3.08) {$q_p^\top k_f$};
+\node[font=\fontsize{14}{17}\selectfont] at (8.17,3.08) {$B_{pf}$};
+\node[font=\fontsize{14}{17}\selectfont] at (13.00,3.08) {$S_{pf}$};
+\rtext{1.13}{2.65}{4.2}{Separate 256D Q/K maps\\Retained from earlier GINE}
+\rtext{6.30}{2.65}{4.2}{0.01 Da width; hydrogen shifts\\Adduct + proton channel}
+\rtext{11.35}{2.65}{3.8}{Same peak/fragment axes\\Both evidence sources}
+\takeaway{Replace fractional-mass matching with a precise-ion bonus for these eligible spectra.}
+\source{Illustrative matrices, not measured scores or a numerical sum. Q/K is retained; precise-ion matching is new. Physical definitions: appendix A.}
+\end{tikzpicture}
+\end{frame}
+
+% 07 — explicitly show how all fragments alter each peak's compatibility row.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{03 / NEW MATCHING}{Cross-attention changes the compatibility matrix}
+\rlabel{.98}{6.66}{FOR ONE PEAK, CONDITION ON THIS CANDIDATE'S FRAGMENTS}
+\node[box,text width=2.28cm,minimum height=.80cm] (at) at (2.50,5.38) {$T_{pf}=\softmax_f$\\$(S_{pf}+\log\pi_f)$};
+\foreach \i/\tone/\h in {0/25/.23,1/70/.63,2/15/.13,3/95/.85,4/35/.31}{
+ \fill[ink!\tone] (4.56+\i*.39,5.00) rectangle +(.27,\h);}
+\node[small] at (5.50,4.60) {fragment weights};
+\node[box,text width=2.10cm,minimum height=.80cm] (ct) at (8.17,5.38) {$c_p=\sum_f T_{pf}v_f$\\candidate context};
+\draw[arr] (at.east)--(4.40,5.38);\draw[arr] (6.62,5.38)--(ct.west);
+\node[box,text width=2.80cm,minimum height=.80cm] (mix) at (12.92,5.38) {Mix $u_p,\ c_p,\ u_p\odot c_p$\\then project to fragments};
+\draw[arr] (ct.east)--(mix.west);
+\node[inner sep=0,font=\fontsize{9}{11}\selectfont] at (9.80,6.30) {$u_p=\operatorname{RMS}(q_pU),\ v_f=\operatorname{RMS}(k_fV)$};
+\rheat{1.27}{2.40}{.91}{0}
+\node[font=\fontsize{21}{23}\selectfont] at (3.70,3.25) {$+$};
+\rheat{4.26}{2.40}{.91}{3}
+\node[font=\fontsize{21}{23}\selectfont] at (6.74,3.25) {$=$};
+\rheat{7.30}{2.40}{.91}{4}
+\node[small] at (2.28,2.14) {$S$: base scores};
+\node[small] at (5.29,2.14) {$\delta$: learned residual};
+\node[small] at (8.34,2.14) {$\widehat S$: final matrix};
+\draw[thinarr] (mix.south)--(12.92,4.22)--(5.30,4.22)--(5.30,4.12);
+\rtext{10.72}{3.72}{4.37}{\textbf{32D adapter; 20,512 parameters}\\[5pt]A fragment is now scored in the context of the whole candidate.}
+\takeaway{Attention supplies candidate context; its learned residual changes both score reductions.}
+\source{Candidate cross-attention is distinct from the existing asymmetric Q/K similarity. Adapter output starts at zero in fresh head training. Bar heights and matrix shades are illustrative, not observed attention.}
+\end{tikzpicture}
+\end{frame}
+
+% 08 — precise semantics of the two reductions.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{03 / NEW MATCHING}{Soft evidence across fragments, plus reverse coverage}
+\rheat{1.27}{3.52}{1.35}{4}
+\node[small] at (2.78,6.33) {fragments $f$};
+\node[small,rotate=90] at (.95,4.83) {peaks $p$};
+\foreach \i in {0,...,4}{\draw[thinarr] (4.41,3.77+\i*.513)--(5.09,3.77+\i*.513);}
+\node[box,text width=2.76cm,minimum height=1.0cm,inner sep=3pt,small] (fw) at (6.65,5.15) {Per-peak log-mixture\\Uniform peak mean};
+\node[box,text width=2.76cm,minimum height=1.0cm,inner sep=3pt,small] (rv) at (6.65,3.62) {Per-fragment maximum\\Gated fragment sum};
+\draw[thinarr] (2.79,3.43)--(2.79,2.92)--(5.14,2.92)--(5.14,3.62)--(rv.west);
+\node[inner sep=0,font=\brandmedium\fontsize{16}{18}\selectfont] at (9.30,5.15) {$0.65$};
+\node[inner sep=0,font=\brandmedium\fontsize{16}{18}\selectfont] at (9.30,3.62) {$0.35$};
+\draw[arr] (fw.east)--(8.61,5.15);\draw[arr] (rv.east)--(8.61,3.62);
+\node[font=\fontsize{20}{22}\selectfont,inner sep=0] (sum) at (11.20,4.26) {$+$};
+\draw[arr] (9.93,5.15)-|(sum.north);\draw[arr] (9.93,3.62)-|(sum.south);
+\draw[arr] (sum.east)--(12.42,4.26);
+\node[font=\fontsize{19}{22}\selectfont,inner sep=0] at (13.68,4.26) {$F(s,G)$};
+\rmath{1.13}{2.19}{F=\frac{0.65}{|P_s|}\sum_p 0.1\log\sum_f\pi_f e^{\widehat S_{pf}/0.1}+0.35\sum_f\pi_f\max_p\widehat S_{pf}}
+\takeaway{One score per spectrum–molecule pair; gates weight fragments in both directions.}
+\source{Learned fragment prior $\pi=\softmax(g)$. Padded peaks/fragments are excluded. Previously: 0.5/0.5 gated MaxSim, gate only in reverse. Now: 0.65/0.35, gate also in the forward mixture. Matrix is synthetic.}
+\end{tikzpicture}
+\end{frame}
+
+% 09 — the support change is visible, while sample count stays fixed.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{04 / NEW TRAINING SUPPORT}{Eight negatives, drawn from the full pool}
+\node[font=\brandmedium\fontsize{13}{16}\selectfont] at (4.16,6.53) {Previous: first 16 eligible};
+\node[font=\brandmedium\fontsize{13}{16}\selectfont] at (11.80,6.53) {Selected: every eligible candidate};
+\foreach \r in {0,...,3}{\foreach \c in {0,...,11}{
+ \pgfmathtruncatemacro{\idx}{\r*12+\c}
+ \pgfmathtruncatemacro{\tone}{ifthenelse(\idx<16,25,0)}
+ \draw[draw=line,fill=ink!\tone,line width=.5pt] (1.22+\c*.49,4.16-\r*.43) circle (.13);
+ \draw[draw=line,fill=ink!25,line width=.5pt] (8.88+\c*.49,4.16-\r*.43) circle (.13);
+ }}
+\foreach \idx in {0,2,4,6,9,11,13,15}{\pgfmathtruncatemacro{\r}{floor(\idx/12)}\pgfmathtruncatemacro{\c}{mod(\idx,12)}\fill[ink] (1.22+\c*.49,4.16-\r*.43) circle (.13);}
+\foreach \idx in {1,8,14,22,27,33,39,46}{\pgfmathtruncatemacro{\r}{floor(\idx/12)}\pgfmathtruncatemacro{\c}{mod(\idx,12)}\fill[ink] (8.88+\c*.49,4.16-\r*.43) circle (.13);}
+\rtext{1.06}{5.86}{6.1}{A fixed bank excludes the remaining candidates\\from this spectrum's formula-negative branch.}
+\rtext{8.72}{5.86}{6.2}{Uniform sampling without replacement\\refreshes the selection at each visit.}
+\draw[line] (7.91,2.47)--(7.91,6.63);
+\rmath{1.09}{2.31}{q_i(G)=0\quad\text{outside the bank}}
+\rmath{8.76}{2.31}{q_i(G)>0\quad\text{for every eligible }G}
+\fill[ink] (1.18,4.91) circle (.09);\rlabel{1.38}{4.91}{sampled this visit (8)}
+\fill[ink!25] (4.92,4.91) circle (.09);\rlabel{5.12}{4.91}{eligible}
+\draw[line] (8.84,4.91) circle (.09);\rlabel{9.04}{4.91}{outside the fixed bank}
+\takeaway{Expand the sampling support without increasing the number of formula negatives.}
+\source{Illustrative 48-candidate pool. Actual training pools contain 0–255 eligible negatives; use all when fewer than eight. Symmetric InfoNCE remains; no hard mining or exact full-pool loss.}
+\end{tikzpicture}
+\end{frame}
+
+% 10 — make the actual warm/joint sequence explicit; do not overclaim finetuning.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{05 / JOINT ADAPTATION}{Train the matcher, then adapt the encoder with it}
+\node[box,text width=4.75cm,minimum height=1.12cm] (hd) at (3.60,5.92) {\textbf{1. Fresh retrieval head}\\Frozen original JEPA; raw token cache};
+\node[box,text width=5.45cm,minimum height=1.12cm] (jt) at (11.62,5.92) {\textbf{2. Warm joint adaptation}\\Restore head + BatchNorm; train JEPA and head};
+\draw[arr] (hd.east)--node[above,small]{selected head}(jt.west);
+\rtext{1.04}{4.95}{5.0}{Adam head LR $5\times10^{-4}$\\Selected epoch 13: \textbf{45.04\% validation}}
+\rtext{8.55}{4.95}{6.5}{Fresh Adam moments: head $10^{-5}$, JEPA $3\times10^{-6}$\\Selected epoch 2: \textbf{46.02\% validation}}
+\rlabel{1.06}{4.06}{JOINT VALIDATION HIT@1 (\%)}
+\foreach \v/\y in {45.6/2.50,45.8/2.98,46.0/3.46}{\node[anchor=east,inner sep=0,small] at (1.74,\y) {\v};\draw[muted,line width=.45pt] (1.82,\y)--(1.92,\y);}
+\draw[muted,line width=.45pt] (1.92,2.43)--(7.92,2.43);
+\draw[ink,line width=.85pt] plot coordinates {(2.12,3.22)(2.90,3.508)(3.68,2.788)(4.46,3.028)(5.24,2.692)(6.02,2.980)(6.80,2.836)(7.58,2.548)};
+\foreach \x/\y/\e in {2.12/3.22/1,2.90/3.508/2,3.68/2.788/3,4.46/3.028/4,5.24/2.692/5,6.02/2.980/6,6.80/2.836/7,7.58/2.548/8}{\fill[ink] (\x,\y) circle (.043);\node[small,anchor=north,inner sep=0] at (\x,2.28) {\e};}
+\draw[ink,line width=.7pt] (2.90,3.508) circle (.10);
+\rlabel{3.16}{3.66}{selected}
+\rtext{8.72}{3.64}{6.0}{\textbf{Matched continuation control}\\[5pt]Head-only: 45.94\% validation.\\Joint: +0.08 pp, four more correct spectra.}
+\takeaway{The selected recipe includes finetuning; this control shows only a small validation benefit.}
+\source{Fixed 5,000-spectrum validation subset. Eight measured joint epochs; epoch 0 / warm baseline eligible for selection. First strict maximum optimistic validation Hit@1 wins; stable agrees. Seed 0; test never used for checkpoint selection.}
+\end{tikzpicture}
+\end{frame}
+
+% 11 — measured cumulative hits; all bars have a zero baseline and common axis.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{06 / HELD-OUT RESULTS}{44.10\% at rank 1; 83.57\% within the top 10}
+\rlabel{.99}{6.61}{17,556 SPECTRA · 2,909,859 CANDIDATE PAIRS}
+\node[anchor=base west,inner sep=0,font=\brandmedium\fontsize{42}{44}\selectfont] at (.98,5.03) {44.10\%};
+\rlabel{1.04}{4.56}{Hit@1 · 7,743 correct spectra}
+\draw[line] (1.03,4.12)--(6.27,4.12);
+\node[anchor=base west,inner sep=0,font=\brandmedium\fontsize{23}{25}\selectfont] at (1.06,3.50) {2};
+\rlabel{2.29}{3.64}{median rank}
+\node[anchor=base west,inner sep=0,font=\brandmedium\fontsize{23}{25}\selectfont] at (1.06,2.65) {4.9549};
+\rlabel{4.32}{2.81}{mean MCES@1}
+\foreach \y/\lab/\v in {6.02/1/44.1046,5.33/2/57.6384,4.64/5/73.5703,3.95/10/83.5726,3.26/20/92.2306}{
+ \node[anchor=east,inner sep=0,small] at (8.32,\y+.16) {Hit@\lab};
+ \fill[soft] (8.60,\y) rectangle +(5.30,.32);
+ \fill[ink] (8.60,\y) rectangle +(\v*.053,.32);
+ \node[anchor=west,inner sep=0,small] at (14.10,\y+.16) {\pgfmathprintnumber[fixed,precision=2]{\v}\%};}
+\foreach \x/\lab in {8.60/0,11.25/50,13.90/100}{\draw[muted,line width=.45pt] (\x,2.97)--(\x,2.87);\node[small,anchor=north,inner sep=0] at (\x,2.79) {\lab};}
+\rlabel{8.57}{2.29}{MRR 0.5751\quad Mean rank 7.3779}
+\takeaway{Every spectrum has equal weight; 46.02\% is the validation result, not the test result.}
+\source{Full original supplied formula pools; stable and optimistic ranks agree. MCES threshold 15: exact below threshold, possibly certified lower bounds above; zero failed queries. No uncertainty intervals estimated.}
+\end{tikzpicture}
+\end{frame}
+
+% 12 — evidence and maintained implementation, not a new research proposal.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{07 / WHAT IS NOW ESTABLISHED}{One selected recipe, reproduced end to end}
+\node[box,text width=2.8cm,minimum height=1.12cm] (ck) at (2.78,5.63) {Validation-selected\\checkpoint\\epoch 2};
+\node[box,text width=3.2cm,minimum height=1.12cm] (cl) at (7.63,5.63) {Cleaned JAX pipeline\\same weights + inputs\\complete candidate pools};
+\node[box,text width=3.1cm,minimum height=1.12cm] (ev) at (13.0,5.63) {17,556 test spectra\\all ranks + top predictions\\\textbf{exactly reproduced}};
+\draw[arr] (ck.east)--(cl.west);\draw[arr] (cl.east)--(ev.west);
+\rtext{1.04}{4.21}{6.4}{\textbf{Supported implementation}\\[6pt]\texttt{scripts/run\_retrieval\_jax.py}\\Head $\to$ joint adaptation $\to$ evaluation.\\Fixed architecture, objective and ranking score.}
+\rtext{8.55}{4.21}{6.3}{\textbf{Interpretation}\\[6pt]One selected seed; historical changes are combined.\\The gain is not attributed to one module.\\GLACIER pretraining disjointness is unverified.}
+\rtext{1.04}{2.42}{6.8}{Method: \texttt{docs/retrieval\_recipe.md}}
+\takeaway{44.10\% full-test Hit@1, with a documented and maintained retrieval pipeline.}
+\source{Canonical full-test app: ap-GGtsFE4jAulaC5OU12stT8. Same complete saved-rank archive as the original runtime. This result-level equality is not a universal claim of bitwise GPU score determinism.}
+\end{tikzpicture}
+\end{frame}
+
+\appendix
+% 13 — equations complement, rather than crowd, the visual explanation.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{APPENDIX A / EXACT SCORER}{Ion evidence and the 32D candidate residual}
+\rlabel{.99}{6.64}{PRECISE-ION BONUS}
+\rmath{1.02}{6.05}{\Delta_{pf}(a)=x_p-(M_G\rho_f+a),\qquad j_{pf}(a)=\operatorname{clip}(\operatorname{rint}(\Delta_{pf}(a)/H),-2,2)}
+\rmath{1.02}{5.36}{K_{pf}(a)=\exp\!\left[-\left(\frac{\Delta_{pf}(a)-j_{pf}(a)H}{0.01\;\mathrm{Da}}\right)^2\right],\quad B_{pf}=1.5e^{\theta_\beta}\max\{K_{pf}(a_s),0.5K_{pf}(a_H)\}}
+\rlabel{.99}{4.55}{CANDIDATE-CONDITIONED RESIDUAL}
+\rmath{1.02}{3.98}{u_p=\operatorname{RMS}(q_pU),\quad v_f=\operatorname{RMS}(k_fV),\quad T_{pf}=\softmax_f(S_{pf}+\log\pi_f),\quad c_p=\sum_fT_{pf}v_f}
+\rmath{1.02}{3.27}{b_p=\tanh(u_pA_q+c_pA_c+(u_p\odot c_p)A_x+b),\quad\delta_{pf}=\frac{(b_pO)^\top v_f}{\sqrt{32}}}
+\rmath{1.02}{2.54}{S_{pf}=q_p^\top k_f+B_{pf},\qquad\widehat S_{pf}=S_{pf}+\delta_{pf},\qquad\operatorname{RMS}(x)=x/\sqrt{\operatorname{mean}(x^2)+10^{-6}}}
+\takeaway{The candidate's fragment set affects every peak–fragment score through $c_p$.}
+\source{$H=1.00782503207$ Da; $a_H=H-0.000548579909065$; observed $a_s$ is proton or sodium adduct mass. All run spectra are eligible. Padded fragments masked; attention temperature 1; $U,V$: $256\times32$.}
+\end{tikzpicture}
+\end{frame}
+
+% 14 — reproducibility contract in a small table, with honest denominators.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{APPENDIX B / REPRODUCTION}{The fixed training and evaluation contract}
+\rlabel{1.02}{6.53}{COMPONENT}
+\rlabel{5.14}{6.53}{SELECTED SETTING}
+\draw[ink,line width=.7pt] (1.02,6.28)--(15.00,6.28);
+\rlabel{1.02}{5.94}{Dataset}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,5.94) {194,119 train / 5,000 selected validation / 17,556 test};
+\rlabel{1.02}{5.51}{JEPA student}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,5.51) {Step 1,190,000; 25 layers; width 2,048; 127 physical peaks};
+\rlabel{1.02}{5.08}{Molecule encoder}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,5.08) {GINE width 496; three layers; global context; up to 128 fragments};
+\rlabel{1.02}{4.65}{Compatibility}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,4.65) {Q/K 256D; candidate adapter 32D; precise-ion log-mixture};
+\rlabel{1.02}{4.22}{Loss / negatives}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,4.22) {Symmetric InfoNCE; $\tau=0.05$; eight uniform full-pool negatives};
+\rlabel{1.02}{3.79}{Training}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,3.79) {Seed 0; batch 128; dropout 0.1; Adam; head then joint};
+\rlabel{1.02}{3.36}{Trainable parameters}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,3.36) {Head 4,121,707; joint total 1,520,462,443};
+\rlabel{1.02}{2.93}{Test ranking}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,2.93) {Complete supplied pools; stable ties; spectrum weighting};
+\rlabel{1.02}{2.50}{Numerics}
+\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.5}{9}\selectfont] at (5.14,2.50) {BF16 JEPA compute; FP32 weights / Adam; FP16 token boundary};
+\draw[ink,line width=.7pt] (1.02,2.24)--(15.00,2.24);
+\takeaway{Configuration, selection and evaluation are pinned in the method document.}
+\source{Full validation split: 19,429 spectra; selection uses the fixed 5,000-row subset. Formula negatives exclude exact truth SMILES; in-batch exclusions use InChIKey14. Float32 matmul precision: highest.}
+\end{tikzpicture}
+\end{frame}
+
+\end{document}

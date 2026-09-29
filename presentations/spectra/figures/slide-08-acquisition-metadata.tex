@@ -1,0 +1,28 @@
+% Editable standalone vector figure extracted from spectra.tex.
+% Source slide 8; figure 07; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\spectrum{1.15}{4.95}{.66}
+\node[tag] at (2.34,4.00) {$(m_i,I_i)\mapsto h_i$};
+\node[box,minimum width=3.7cm,text width=3.4cm,minimum height=1.1cm,inner sep=4pt] (contextencoder) at (7.4,5.7) {Spectrum encoder};
+\draw[arr] (3.90,5.7)--(contextencoder.west);
+\peaktokens{11.95}{5.4}{ink}
+\draw[arr] (contextencoder.east)--(11.95,5.7);
+\node[tag] at (12.97,4.76) {$h_1,\ldots,h_N,h_{\rm CLS}$};
+% Acquisition metadata are coordinates, not an extra model operation.
+\node[inner sep=0,font=\figurefont] (metadata) at (7.4,2.75) {$\bigl(a_1,a_2,\ldots,a_{28}\bigr)$};
+\node[small,inner sep=0] at (7.4,2.17) {$a\in\mathbb R^{28}$};
+\draw[arr] (metadata.north)--node[right,small]{$\gamma_a,\beta_a$}(contextencoder.south);
+\foreach \y/\label in {3.25/Precursor · charge,2.75/Energy · instrument,2.25/Time · polarity}{\node[anchor=west,inner sep=0,small] at (1.15,\y) {\label};}
+\draw[thinarr] (4.05,2.75)--(metadata.west);
+\node[anchor=west,inner sep=0,font=\figurefont] at (10.20,3.05) {$\displaystyle h'=(1+\gamma_a)\odot\bar h+\beta_a$};
+\node[anchor=west,inner sep=0,font=\figurefont] at (10.20,2.30) {$\displaystyle\bar h=\operatorname{RMSNorm}(h)$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,31 @@
+% Editable standalone vector figure extracted from spectra.tex.
+% Source slide 19; figure 18; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\node[small] at (2.3,6.45) {Masked pair grid};
+\foreach \i in {0,...,3}{\foreach \j in {0,...,3}{
+ \pgfmathtruncatemacro{\mask}{ifthenelse(\i==1||\j==1,1,0)}
+ \ifnum\mask=1 \draw[ghost,line width=.55pt] (1.27+\j*.54,4.08+\i*.54) rectangle +(.46,.46);
+ \else \draw[ink,fill=ink!20,line width=.55pt] (1.27+\j*.54,4.08+\i*.54) rectangle +(.46,.46);\fi}}
+\node[small] at (2.3,3.72) {$i,j$};
+\node[box,text width=3.8cm,inner xsep=4pt,minimum height=1.15cm] (pairencoder) at (6.73,5.14) {Triangle encoder\\+ pair predictor};
+\draw[arr] (3.56,5.14)--(pairencoder.west);
+\draw[arr] (pairencoder.east)--(10.05,5.14);
+\draw[thinarr] (10.75,4.3)--(14.66,4.3);
+\draw[ink,line width=.55pt] (10.75,4.3)--(10.75,5.83);
+\foreach \y/\lab in {4.3/0,4.98/0.2,5.66/0.4}{\draw[ink,line width=.55pt] (10.75,\y)--+(-.05,0);\node[tinytext,anchor=east] at (10.65,\y) {\lab};}
+\foreach \i/\h in {0/.068,1/.102,2/.272,3/.85,4/1.36,5/.51,6/.17,7/.068}{\fill[ink] (10.93+\i*.4,4.3) rectangle +(.25,\h);}
+\node[small] at (12.55,6.25) {$p_{ij}(b)$};
+\node[small] at (12.71,3.85) {Mass-gap bins (schematic)};
+\node[anchor=base west,inner sep=0,font=\figurefont] at (1.05,2.92) {$\mathcal L_{\rm pair}=\sum\nolimits_r\lambda_r\,\mathrm{CE}\!\left(p_{ij}^{(r)},\operatorname{bin}_r|m_i-m_j|\right)$};
+\node[anchor=base west,inner sep=0,small] at (1.05,2.21) {Separate research direction};
+\node[anchor=base west,inner sep=0,small] at (9.37,2.21) {Outside the reported 33\% system};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,50 @@
+% Editable standalone vector figure extracted from spectra.tex.
+% Source slide 2; figure 01; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\molecule{2.05}{4.95}{.7}
+\node[tag] at (2.05,3.58) {$G=(V,A)$};
+\draw[arr] (3.24,5.54)--node[above,small]{fragmentation}(6.1,5.54);
+\draw[arr,dashed] (6.1,4.56)--node[below,small]{inverse problem}(3.24,4.56);
+\spectrum{6.7}{4.13}{.9}
+\node[tag] at (8.32,2.98) {$S=\{(m_i,I_i)\}_{i=1}^{N}$};
+\node[small,anchor=base,inner sep=0] at (13.25,6.42) {Same formula: $F=\mathrm{C_6H_6O}$};
+\coordinate (candidatefork) at (11.1,4.75);
+\draw[arr] (10.32,4.75)--(candidatefork);
+\draw[ink,line width=.55pt] (11.1,3.2)--(11.1,5.72);
+\foreach \y in {5.72,4.46,3.2}{\draw[thinarr] (11.1,\y)--(11.91,\y);}
+% Phenol, SMILES Oc1ccccc1. Alternating inner bonds retain line-angle clarity.
+\begin{scope}[shift={(12.83,5.72)}]
+ \draw[ink,line width=.55pt] (-.42,0)--(-.21,.364)--(.21,.364)--(.42,0)--(.21,-.364)--(-.21,-.364)--cycle;
+ \draw[ink,line width=.55pt] (-.327,.016)--(-.167,.294) (.167,.294)--(.327,.016) (.17,-.284)--(-.17,-.284);
+ \draw[ink,line width=.55pt] (.42,0)--(.73,0);
+ \node[anchor=west,inner sep=0,small] at (.79,0) {OH};
+\end{scope}
+\node[anchor=base west,inner sep=0,tag] at (14.7,5.66) {$G_1$};
+% Cyclohexa-2,4-dien-1-one, SMILES O=C1C=CC=CC1.
+\begin{scope}[shift={(12.83,4.46)}]
+ \draw[ink,line width=.55pt] (-.42,0)--(-.21,.364)--(.21,.364)--(.42,0)--(.21,-.364)--(-.21,-.364)--cycle;
+ \draw[ink,line width=.55pt] (-.327,.016)--(-.167,.294) (.17,-.284)--(-.17,-.284);
+ \draw[ink,line width=.55pt] (.42,.038)--(.75,.038) (.42,-.038)--(.75,-.038);
+ \node[anchor=west,inner sep=0,small] at (.81,0) {O};
+\end{scope}
+\node[anchor=base west,inner sep=0,tag] at (14.7,4.40) {$G_2$};
+% Hexa-2,4,5-trienal, SMILES O=CC=CC=C=C; the cumulated bonds are collinear.
+\begin{scope}[shift={(12.65,3.12)}]
+ \node[anchor=south east,inner sep=0,small] at (-.265,.157) {O};
+ \draw[ink,line width=.55pt] (-.234,.179)--(.019,.031) (-.272,.113)--(-.019,-.031);
+ \draw[ink,line width=.55pt] (0,0)--(.34,.20)--(.68,0)--(1.02,.20)--(1.36,0)--(1.70,-.20);
+ \draw[ink,line width=.55pt] (.381,.141)--(.682,-.035) (1.061,.141)--(1.741,-.259);
+ \node[fill=paper,inner sep=.65pt,font=\figurefont] at (1.36,0) {C};
+\end{scope}
+\node[anchor=base west,inner sep=0,tag] at (14.7,3.14) {$G_3$};
+\node[anchor=west,inner sep=0,font=\figurefont] at (1.03,2.63) {$\displaystyle\widehat G=\arg\max\nolimits_G p(G\mid S,F)$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,30 @@
+% Editable standalone vector figure extracted from spectra.tex.
+% Source slide 5; figure 04; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\spectrum{1.25}{5.02}{.54}
+\node[box,minimum width=2.4cm,text width=2.1cm,minimum height=.85cm,inner sep=4pt] (arencoder) at (5.18,5.80) {MIST encoder};
+\draw[arr] (3.58,5.80)--(arencoder.west);
+% Probability-valued fingerprint dimensions, shown as a vector rather than a process box.
+\foreach \i/\shade in {0/94,1/7,2/87,3/91,4/12,5/5,6/84,7/4,8/95,9/13}{\draw[draw=ink,line width=.55pt,fill=ink!\shade] (7.13+\i*.27,5.575) rectangle +(.23,.45);}
+\node[small,inner sep=0] at (8.46,6.47) {$\hat f\in[0,1]^d$};
+\node[box,minimum width=2.8cm,text width=2.5cm,minimum height=.85cm,inner sep=4pt] (ardecoder) at (13.0,5.80) {AR transformer};
+\draw[arr] (arencoder.east)--(7.13,5.80);\draw[arr] (9.79,5.80)--(ardecoder.west);
+% The decoder emits the complete token sequence; a brace attaches the output arrow to it.
+\node[inner sep=0,font=\figurefont] (arprefix) at (2.50,4.07) {\texttt{C6H6O [SEP]}};
+\foreach \i/\t in {0/O,1/c1,2/c,3/c,4/c,5/c,6/c1,7/EOS}{\node[inner sep=0,font=\figurefont] (artoken\i) at (4.55+\i*1.30,4.07) {\texttt{\t}};}
+\draw[thinarr,shorten <=.12cm,shorten >=.12cm] (arprefix.east)--(artoken0.west);
+\foreach \i/\j in {0/1,1/2,2/3,3/4,4/5,5/6,6/7}{\draw[thinarr,shorten <=.12cm,shorten >=.12cm] (artoken\i.east)--(artoken\j.west);}
+\draw[ink,line width=.55pt,decorate,decoration={brace,amplitude=.10cm}] (4.18,4.52)--(14.22,4.52);
+\draw[arr] (ardecoder.south)--(13.0,4.94)--(9.20,4.94)--(9.20,4.64);
+\node[anchor=west,inner sep=0,font=\figurefont] at (1.03,3.25) {$\textstyle p_\psi(s\mid\hat f,F)=\prod_{t=1}^{L}p_\psi(s_t\mid s_{<t},\hat f,F)$};
+\node[anchor=west,inner sep=0,font=\figurefont] at (1.03,2.43) {$\textstyle\mathcal L_{\rm AR}=-\sum\nolimits_t\log p_\psi(s_t\mid s_{<t},\hat f,F)$};
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

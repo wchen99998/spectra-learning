@@ -1,0 +1,265 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage{presentation-theme}
+\tikzset{every node/.style={font=\figurefont\fontsize{8}{10}\selectfont,text=ink},small/.style={font=\figurefont\fontsize{7.2}{9}\selectfont},tag/.style={font=\figurefont\fontsize{7.2}{9}\selectfont,text=muted},cell/.style={font=\figurefont\fontsize{8.4}{10}\selectfont,align=center,minimum width=2.2cm,minimum height=.62cm,inner sep=0}}
+\title{Where formula-candidate retrieval fails}
+\author{Wuhao}
+\date{29 September 2026}
+\hypersetup{pdftitle={where retrieval fails},pdfsubject={Failure analysis of MassSpecGym formula-candidate retrieval}}
+\input{figures/numbers.tex}
+\newcommand{\fig}[4]{\node[anchor=north west,inner sep=0] at (#1,#2) {\includegraphics[width=#3cm]{figures/#4.pdf}};}
+\newcommand{\rtext}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm] at (#1,#2) {#4};}
+\newcommand{\rlabel}[3]{\node[anchor=west,inner sep=0,tag] at (#1,#2) {#3};}
+\newcommand{\bignum}[4]{\node[anchor=base west,inner sep=0,font=\brandmedium\fontsize{#4}{#4}\selectfont] at (#1,#2) {#3};}
+\newcommand{\mol}[3]{\begin{scope}[shift={(#1,#2)}]\input{figures/mol_#3.tex}\end{scope}}
+
+\begin{document}
+
+% 01 — headline and denominators.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{RETRIEVAL FAILURE ANALYSIS / 29 SEP 2026}{}
+\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{25}{28}\selectfont,text width=9.4cm,align=left] at (.75,7.30) {Where retrieval\\fails};
+\rtext{.80}{5.25}{8.4}{Failure cases of the validation-selected 15-member ensemble on MassSpecGym formula-candidate retrieval, and what they imply for reaching 50\%}
+\bignum{10.03}{5.13}{\fnTestHit\%}{44}
+\rlabel{10.12}{4.58}{Full-test Hit@1; validation \fnValHit\%}
+\rlabel{10.12}{4.12}{95\% molecule bootstrap: \fnTestLo–\fnTestHi\%}
+\draw[line] (.75,3.58)--(15.25,3.58);
+\foreach \x/\v/\l in {.80/\fnMisses/test spectra ranked wrong,4.45/\fnToFifty/more correct spectra reach 50\%,8.10/\fnDecoyMissShare\%/of misses: a decoy with Tanimoto $\geq$0.7,11.75/\fnModeAny\%/of misses fit one of three failure modes}{
+ \bignum{\x}{2.70}{\v}{20}
+ \rtext{\x}{2.38}{3.3}{\l}}
+\source{Test: 17,556 spectra of 2,998 molecules (InChIKey14), supplied formula pools (median 236 decoys). The analysis is post hoc on test for diagnosis; every model was selected on the fixed 5,000-spectrum validation subset before this analysis.}
+\end{tikzpicture}
+\end{frame}
+
+% 02 — what is analysed and how uncertainty is computed.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{01 / PROTOCOL}{One fixed model, two splits, molecule-level uncertainty}
+\rtext{.80}{6.95}{4.3}{\textbf{Subject model}}
+\rtext{.80}{6.45}{4.3}{Uniform sum of 15 per-query z-scored members, chosen on validation\\[3pt]Test Hit@1 \fnTestHit\%; best single head \fnSingleHit\%}
+\rtext{5.80}{6.95}{4.3}{\textbf{Units}}
+\rtext{5.80}{6.45}{4.3}{Hit@1 of each spectrum (stable ties; truth has no ties)\\[3pt]Test \fnTestN{} spectra from \fnTestMol{} molecules; validation \fnValN{} from \fnValMol}
+\rtext{10.80}{6.95}{4.4}{\textbf{Uncertainty}}
+\rtext{10.80}{6.45}{4.4}{95\% percentile bootstrap resampling molecules, not spectra (1,000 draws; 200 for regressions)\\[3pt]Spectra of one molecule are correlated}
+\draw[line] (.75,4.25)--(15.25,4.25);
+\rtext{.80}{3.95}{14.3}{\textbf{Why clustering matters.} Six spectra per test molecule on average: the naive spectrum-level interval for 47.33\% would be $\pm$0.7 points, the molecule-clustered interval is \fnTestLo–\fnTestHi\%. Differences of less than about 1 point between single runs are not resolvable on this benchmark; validation is shown alongside test to check that each pattern replicates.}
+\takeaway{The main failure patterns replicate on validation; single 100-Da bins can differ.}
+\source{Analysis code: results/retrieval\_failure\_analysis\_20260929/analyze\_failures.py, decompose\_failures.py, memorization\_check.py. Random Hit@1 given the pool sizes: \fnRandom\%.}
+\end{tikzpicture}
+\end{frame}
+
+% 03 — the univariate failure map.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{02 / THE FAILURE MAP}{Accuracy halves for large, sodiated, QTOF and sparse spectra}
+\fig{.80}{7.25}{14.4}{strata}
+\takeaway{\fnMassLow\% at 300–400 Da, \fnMassHigh\% above 500 Da; [M+Na]$^+$ \fnSodium\%; QTOF \fnQtof\%; 1–5 peaks \fnFewPeaks\%.}
+\source{Bars: test Hit@1 (\%), error bars 95\% molecule-clustered bootstrap; open circles: validation. Tick labels give the number of test spectra. Dashed line: overall test Hit@1. Strata overlap; see the next two slides for the joint and adjusted effects.}
+\end{tikzpicture}
+\end{frame}
+
+% 04 — two-way tables separate mass from acquisition.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{02 / THE FAILURE MAP}{Mass and acquisition fail independently}
+\foreach \ox/\title/\ca/\cb in {.95/Mass $\times$ adduct/{[M+H]$^+$}/{[M+Na]$^+$},8.35/Mass $\times$ instrument/Orbitrap/QTOF}{
+ \node[anchor=west,inner sep=0,font=\brandmedium\fontsize{11}{13}\selectfont] at (\ox,6.85) {\title};
+ \node[cell,text=muted] at (\ox+3.35,6.20) {\ca};
+ \node[cell,text=muted] at (\ox+5.60,6.20) {\cb};
+ \node[cell,anchor=west,text=muted,minimum width=0] at (\ox,5.45) {$\leq$500 Da};
+ \node[cell,anchor=west,text=muted,minimum width=0] at (\ox,4.62) {$>$500 Da};}
+\foreach \x/\y/\v/\n/\tone in {4.30/5.45/\fnSmallProton/\fnSmallProtonN/85,6.55/5.45/\fnSmallSodium/\fnSmallSodiumN/45,4.30/4.62/\fnLargeProton/\fnLargeProtonN/40,6.55/4.62/\fnLargeSodium/\fnLargeSodiumN/28,
+  11.70/5.45/\fnSmallOrbi/\fnSmallOrbiN/85,13.95/5.45/\fnSmallQtof/\fnSmallQtofN/38,11.70/4.62/\fnLargeOrbi/\fnLargeOrbiN/36,13.95/4.62/\fnLargeQtof/\fnLargeQtofN/22}{
+ \fill[ink!\tone] (\x-1.05,\y-.38) rectangle (\x+1.05,\y+.38);
+ \node[cell,text=white,font=\brandmedium\fontsize{11}{12}\selectfont] at (\x,\y+.08) {\v\%};
+ \node[cell,text=white,font=\figurefont\fontsize{6}{7}\selectfont] at (\x,\y-.24) {n = \n};}
+\rtext{.95}{3.70}{6.6}{Sodium costs \textbf{18 points} below 500 Da and 5 above, where protonated accuracy has already fallen to \fnLargeProton\%.}
+\rtext{8.35}{3.70}{6.8}{QTOF costs \textbf{26 points} below 500 Da. Large Orbitrap spectra (\fnLargeOrbi\%) are still far below small ones (\fnSmallOrbi\%).}
+\takeaway{No single cause: large molecules fail even as [M+H]$^+$ Orbitrap, and acquisition matters even when small.}
+\source{Test Hit@1 (\%) of the ensemble in each cell; shading is proportional to accuracy. The 409 test spectra without a recorded instrument are omitted from the right table. 95\% intervals: analysis.json, key test.two\_way.}
+\end{tikzpicture}
+\end{frame}
+
+% 05 — adjusted effects.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{03 / WHAT PREDICTS A MISS}{Decoy similarity is the strongest factor, once the others are held fixed}
+\fig{.80}{7.20}{8.3}{forest}
+\rtext{9.75}{7.05}{5.4}{\textbf{Multivariable logistic model} of a correct top-1 on eight spectrum, molecule and pool covariates}
+\rtext{9.75}{6.00}{5.4}{Each +0.1 of max decoy Tanimoto: odds $\times$\fnOrDecoy\\[2pt]Each +100 Da: $\times$\fnOrMass;\ [M+Na]$^+$: $\times$\fnOrSodium;\ QTOF: $\times$\fnOrQtof\\[2pt]Twice as many peaks: $\times$\fnOrPeaks}
+\rtext{9.75}{4.00}{5.4}{Train similarity has no consistent independent effect (test $\times$\fnOrTrain; small on validation). Its apparent drop is carried by decoy similarity (slide 8).}
+\takeaway{Mass, sodium, QTOF and spectrum sparsity remain independent risks after adjustment.}
+\source{Logistic regression (unpenalized), test (filled squares) and validation (open circles); 95\% intervals from 200 molecule-clustered bootstrap refits. Similarities: Morgan radius 2, 2,048 bits. Pool size and rotatable bonds are included as controls.}
+\end{tikzpicture}
+\end{frame}
+
+% 06 — covariate shift.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{04 / DISTRIBUTION SHIFT}{Test is dominated by the molecules training rarely shows}
+\fig{.80}{7.25}{14.4}{shift}
+\rtext{.80}{2.95}{7.0}{Median parent mass \fnTrainMedian{} Da in training, \fnTestMedian{} Da in test; above 500 Da: \fnTrainLarge\% vs \fnTestLarge\%.}
+\rtext{8.35}{2.95}{6.9}{QTOF is \emph{over}-represented in training (\fnTrainQtof\% vs \fnTestQtof\%): its weakness is not a shift.}
+\takeaway{Half the test set sits where training has 17\% of its spectra and the model is weakest.}
+\source{Share of spectra per split. Training: all MassSpecGym train-fold spectra; test: the 17,556 evaluated spectra. Reweighting training toward the validation mass/adduct mix did not help: runs (power 0.5 and 1.0): best-epoch validation 44.46\% and 42.52\% vs 44.50\% for the control.}
+\end{tikzpicture}
+\end{frame}
+
+% 07 — pool difficulty.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{05 / POOL DIFFICULTY}{The pool often contains a close structural analogue}
+\fig{.80}{7.25}{14.4}{decoy}
+\takeaway{\fnDecoyShare\% of test spectra have a decoy with Tanimoto $\geq$0.7; they contain \fnDecoyMissShare\% of all misses.}
+\source{Left: Hit@1 by the maximum Tanimoto similarity between the truth and any decoy in its formula pool. Right: by the truth's maximum similarity to any training molecule. Tick labels: test spectra per bin. Error bars: 95\% molecule-clustered bootstrap; circles: validation.}
+\end{tikzpicture}
+\end{frame}
+
+% 08 — train similarity is a decoy effect, not memorization.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{05 / POOL DIFFICULTY}{The training-analogue drop is a decoy effect, not memorization}
+\rtext{.80}{6.95}{6.7}{\textbf{Truth has a close training analogue} (Tanimoto $\geq$0.8): Hit@1 \fnTrainSimTop\%}
+\foreach \y/\v/\n/\l/\tone in {5.70/\fnTrainSimNoDecoy/\fnTrainSimNoDecoyN/no decoy $\geq$0.7 in the pool/100,4.70/\fnTrainSimDecoy/\fnTrainSimDecoyN/a decoy $\geq$0.7 in the pool/30}{
+ \fill[ink!\tone] (.80,\y-.30) rectangle (.80+\v*.055,\y+.30);
+ \node[anchor=west,inner sep=0,font=\brandmedium\fontsize{12}{13}\selectfont] at (.95+\v*.055,\y) {\v\%};
+ \node[anchor=west,inner sep=0,small,text=muted] at (.80,\y-.55) {\l;\ n = \n{} spectra};}
+\draw[line] (8.10,2.30)--(8.10,7.00);
+\rtext{8.55}{6.95}{6.6}{\textbf{Does the model pick a training molecule?}}
+\bignum{8.55}{5.40}{\fnMemoMiss\%}{30}
+\rtext{8.55}{5.00}{6.5}{of test misses have a training-set molecule as the wrong top-1; \fnMemoPools\% of pools contain one at all.}
+\rtext{8.55}{3.95}{6.5}{Analogue series put near-duplicates of the truth into the same formula pool; the model then has to separate them from the spectrum alone.}
+\takeaway{Close analogues make the pool hard; the model is not recalling training answers.}
+\source{Test spectra. Memorization check (memorization\_check.py): top-1 identity versus the set of train-fold SMILES; the chance rate for a random decoy is 0.06\%. Validation gives the same picture (0.6\% of misses).}
+\end{tikzpicture}
+\end{frame}
+
+% 09 — anatomy of misses.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{06 / WHAT A MISS LOOKS LIKE}{Most misses are near misses}
+\fig{.80}{7.25}{14.4}{misses}
+\takeaway{\fnRankFive\% of misses rank the truth in the top 5; \fnNearIsomer\% pick a near-isomer (Tanimoto $\geq$0.7).}
+\source{All \fnMisses{} test misses of the ensemble. Right: similarity between the wrongly chosen candidate and the truth; black bins are $\geq$0.7. Median \fnTopSimMedian; \fnSameScaffold\% share the truth's Murcko scaffold. Only \fnRankFar\% of misses place the truth below rank 20.}
+\end{tikzpicture}
+\end{frame}
+
+% 10 — examples.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{06 / WHAT A MISS LOOKS LIKE}{Three representative failures}
+\foreach \x/\t/\a in {.80/Near-isomer/{ID0251189 · [M+H]$^+$ · Orbitrap\\628 Da · 80 peaks · truth rank 9\\Tanimoto(top-1, truth) 0.90},5.75/Uninformative spectrum/{ID0368034 · [M+Na]$^+$ · Orbitrap\\570 Da · 3 peaks · truth rank 30\\no fragment ion matches either molecule},10.70/Large sodiated molecule/{ID0262692 · [M+Na]$^+$ · Orbitrap\\785 Da · 12 peaks · truth rank 6\\fragments explain 60\% (truth) vs 96\%}}{
+ \node[anchor=west,inner sep=0,font=\brandmedium\fontsize{11}{13}\selectfont] at (\x,7.00) {\t};
+ \node[anchor=north west,inner sep=0,align=left,font=\figurefont\fontsize{6.8}{8.2}\selectfont,text=muted] at (\x,6.74) {\a};}
+\foreach \x/\slug in {.80/near_isomer,5.75/uninformative_spectrum,10.70/large_sodiated_molecule}{
+ \rlabel{\x}{5.72}{truth}
+ \mol{\x}{3.95}{\slug_truth}
+ \rlabel{\x}{3.78}{wrong top-1}
+ \mol{\x}{1.98}{\slug_top1}}
+\foreach \x in {5.40,10.35}{\draw[line] (\x,2.10)--(\x,7.10);}
+\takeaway{Isomers, empty spectra and sugar-rich natural products: different failures need different fixes.}
+\source{Chosen by fixed rules before viewing: the test miss whose pool size is closest to the median (first by row order on ties), among misses with top-1 Tanimoto $\geq$0.9 and $>$10 peaks; with $\leq$3 peaks and Tanimoto $<$0.7; and [M+Na]$^+$ above 600 Da with the wrong top-1 explaining at least as much intensity. Drawings: RDKit 2D coordinates, heavy atoms only.}
+\end{tikzpicture}
+\end{frame}
+
+% 11 — fragment evidence.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{07 / FRAGMENT EVIDENCE}{On most misses the wrong molecule explains the spectrum as well}
+\fig{.80}{7.25}{14.4}{fragment}
+\takeaway{In \fnFragIndist\% of misses the wrong top-1 explains at least as much intensity: \fnFragStrict\% more, \fnFragTie\% exactly as much.}
+\source{Test. Share of peak intensity matched by any GLACIER fragment ion of the molecule (0.01 Da, $-$2..+2 H, adduct or proton). Ties include the \fnFragZero\% of misses where neither molecule explains any intensity. On hits the truth explains \fnFragHits\%; above 500 Da \fnFragLargeHits\%; [M+Na]$^+$ \fnFragSodiumHits\%.}
+\end{tikzpicture}
+\end{frame}
+
+% 12 — fragment side cannot be fixed by the proposal generator.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{07 / FRAGMENT EVIDENCE}{More or better-conditioned GLACIER proposals do not help}
+\fig{.80}{7.25}{14.4}{bounds}
+\rtext{.80}{3.00}{7.1}{All proposals vs 128: coverage \fnCapCov$\to$\fnCapCovAll\%, weighted ranking \fnCapWeighted$\to$\fnCapWeightedAll\%; enumeration ranks at \fnEnumHit\%.}
+\rtext{8.35}{3.00}{6.9}{Own-adduct proposals, [M+Na]$^+$ (n = \fnCondNaN): coverage \fnCondNaFixed$\to$\fnCondNaMatched\%, ranking \fnCondNaWFixed$\to$\fnCondNaWMatched\%.}
+\takeaway{The fragment generator, not its cap or conditioning, limits what the spectrum can confirm.}
+\source{Validation only, 600 fixed queries. Fragment-only rankers: explained intensity (coverage) or intensity credited with GLACIER's predicted fragment intensity (weighted); ties count as misses. Enumeration explains \fnEnumCov\% of truth intensity. GLACIER returns nearly identical proposals for both adducts.}
+\end{tikzpicture}
+\end{frame}
+
+% 13 — interventions.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{08 / WHAT WAS TRIED}{Ten single-head changes stay inside the noise}
+\fig{.80}{7.20}{8.6}{interventions}
+\rtext{9.95}{7.05}{5.2}{\textbf{Control}: pt407000 cached-token head, SWA\\val \fnControlVal\%, test \fnControlTest\%}
+\rtext{9.95}{5.95}{5.2}{Best test change: \fnBestTestDelta{} points. Validation gains up to +1.1 do not transfer to test.}
+\rtext{9.95}{4.80}{5.2}{Spectrum-side changes (readouts, intermediate layers, other checkpoints) all land a single head at 43–45.6\%: the peak tokens are not the bottleneck.}
+\takeaway{The failures on slides 3–12 are not addressed by regularization, readouts or negatives.}
+\source{One seed per run; SWA over epochs 4..last. Checkpoint diversity (encoder steps 125k–1.19M) and ensembling of 15 members give the 47.33\% headline. Covariate reweighting runs are omitted (hung; best-epoch validation below control).}
+\end{tikzpicture}
+\end{frame}
+
+% 14 — ensemble agreement and counterfactuals.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{09 / HEADROOM}{A third of the test set defeats every member}
+\fig{.80}{7.20}{14.4}{agreement}
+\rtext{.80}{3.35}{6.8}{\fnAllMiss\% are missed by all 15 members; a per-query oracle over members would reach \fnOracle\%. All members share the molecule side.}
+\rtext{8.35}{3.35}{6.9}{Fixing spectra above 500 Da would give \fnCfLarge\%, close-decoy pools \fnCfDecoy\%; sodium, QTOF or sparse spectra alone about 50\%.}
+\takeaway{The route past 50\% runs through large molecules and near-isomer pools.}
+\source{Counterfactual: overall test Hit@1 if the stratum's Hit@1 equalled that of all other test spectra, holding everything else fixed. Illustrative arithmetic, not a model prediction; strata overlap.}
+\end{tikzpicture}
+\end{frame}
+
+% 15 — taxonomy and levers.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{10 / SUMMARY}{Three failure modes and the levers that match them}
+\foreach \y/\mode/\share/\evidence/\lever in {
+ 6.20/{Fragment-\\indistinguishable}/\fnModeFrag\%/{Wrong top-1 explains $\geq$ intensity; truth explains only \fnFragLargeHits\% above 500 Da even on hits}/{Learned, adduct-conditioned fragmenter trained on the retrieval loss},
+ 4.95/Near-isomer/\fnModeIsomer\%/{Top-1 Tanimoto $\geq$0.7; \fnDecoyShare\% of pools contain such a decoy}/{Pairwise decoy-aware scoring; hard negatives from close analogues},
+ 3.70/Uninformative spectrum/\fnModePeaks\%/{$\leq$5 peaks; odds $\times$\fnOrPeaks{} per doubling of peaks}/{Abstain or defer to priors; nothing in the spectrum to fix}}{
+ \draw[line] (.75,\y+.55)--(15.25,\y+.55);
+ \node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{11}{13}\selectfont,text width=3.6cm] at (.80,\y+.35) {\mode};
+ \node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{15}{16}\selectfont] at (4.55,\y+.35) {\share};
+ \rtext{6.15}{\y+.35}{4.3}{\evidence}
+ \rtext{10.75}{\y+.35}{4.5}{\lever}}
+\rlabel{.80}{7.05}{FAILURE MODE}\rlabel{4.55}{7.05}{OF MISSES}\rlabel{6.15}{7.05}{EVIDENCE}\rlabel{10.75}{7.05}{MATCHING LEVER}
+\rtext{.80}{2.60}{14.4}{Modes overlap: \fnModeAny\% of misses fit at least one, \fnModeNone\% fit none.}
+\takeaway{The dominant mode is fragment-level: the spectrum is explained equally well by the wrong structure.}
+\source{Shares of the \fnMisses{} test misses. Near-isomer: Morgan r=2 Tanimoto(top-1, truth) $\geq$0.7. Uninformative: $\leq$5 peaks. Fragment-indistinguishable: under GLACIER fragments and the scorer's kernel. Levers are proposals, not results.}
+\end{tikzpicture}
+\end{frame}
+
+% 16 — conclusions.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{11 / CONCLUSIONS}{What the failure cases say about reaching 50\%}
+\foreach \y/\n/\t in {6.95/1/{\textbf{Concentrated.} Spectra above 500 Da are \fnLargeShare\% of the test set and \fnLargeMissShare\% of its misses; accuracy there is \fnMassHigh\%.},
+ 5.85/2/{\textbf{Independent.} Mass, [M+Na]$^+$, QTOF and sparse spectra each lower the odds after adjustment; the benchmark's pools add close analogues on top.},
+ 4.75/3/{\textbf{Near.} \fnRankFive\% of misses rank the truth in the top 5; the wrong answer is often a near-isomer.},
+ 3.65/4/{\textbf{Fragment-limited.} The wrong structure explains the spectrum as well in \fnFragIndist\% of misses; more or re-conditioned GLACIER proposals do not change that.}}{
+ \node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{15}{16}\selectfont] at (.80,\y) {\n};
+ \rtext{1.45}{\y}{13.6}{\t}}
+\takeaway{Next: learn which bonds break, per adduct and energy, from the retrieval signal itself.}
+\source{The 50\% target is \fnToFifty{} spectra (2.7 points) away and inside the molecule-clustered 95\% interval (\fnTestLo–\fnTestHi\%); a claimed improvement needs to exceed about 1 point on validation and replicate on test.}
+\end{tikzpicture}
+\end{frame}
+
+% A1 — definitions.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{APPENDIX A / DEFINITIONS}{Quantities used in this deck}
+\foreach \y/\t/\d in {
+ 6.95/Hit@1/{Truth ranked first among its supplied formula pool; ties with earlier candidates count against the truth (none occur for the truth)},
+ 6.25/Ensemble score/{Sum over 15 members of each member's scores z-scored within the query's pool},
+ 5.55/Tanimoto/{Morgan fingerprints, radius 2, 2,048 bits, RDKit; train similarity is the maximum over unique train-fold SMILES},
+ 4.85/Max decoy similarity/{Maximum Tanimoto between the truth and any other candidate in its pool},
+ 4.15/Explained intensity/{Share of observed intensity within 0.01 Da of a GLACIER fragment ion (fragment + adduct or proton, $-$2..+2 H)},
+ 3.45/Bootstrap/{Resample InChIKey14 clusters with replacement; 95\% percentile interval of the pooled Hit@1},
+ 2.75/Logistic model/{Unpenalized; covariates: mass/100, [M+Na]$^+$, QTOF, $\log_2$ peaks, $\log_2$ pool size, similarities $\times$10, rotatable bonds/5}}{
+ \node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{9.5}{11}\selectfont,text width=3.5cm] at (.80,\y) {\t};
+ \rtext{4.50}{\y}{10.7}{\d}}
+\source{Source files: results/retrieval\_failure\_analysis\_20260929/analysis.json (all strata, regressions, bounds), decomposition.json, memorization.json, examples.json; results/retrieval\_ensemble\_20260927/README.md (interventions).}
+\end{tikzpicture}
+\end{frame}
+
+\end{document}

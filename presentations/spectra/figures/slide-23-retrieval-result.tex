@@ -1,0 +1,25 @@
+% Editable standalone vector figure extracted from spectra.tex.
+% Source slide 23; figure 22; native embedded fonts.
+% Compile with LuaLaTeX from this directory, or run ../export_figures.py.
+\documentclass[tikz,border=0pt]{standalone}
+\input{nature-figure-preamble.tex}
+\begin{document}
+\figurefont
+\begin{tikzpicture}[x=1cm,y=1cm,scale=1.14375,transform shape]
+\node[anchor=north west,inner sep=0,font=\brandmedium\figurefont] at (1.05,6.45) {36.94\%};
+\node[anchor=west,inner sep=0,font=\brandmedium\figurefont] at (1.05,4.57) {Test Hit@1};
+\node[anchor=west,inner sep=0,small] at (1.05,3.72) {Global context + GLACIER};
+\node[anchor=west,inner sep=0,small] at (1.05,3.08) {17,556 test spectra};
+\node[anchor=west,inner sep=0,font=\brandmedium\figurefont] at (1.05,2.37) {Results: 18 Sep 2026};
+\draw[line,line width=.55pt] (7.05,6.46)--(7.05,2.06);
+\node[anchor=west,inner sep=0,small] at (7.85,6.15) {Metric};
+\node[anchor=east,inner sep=0,small] at (14.65,6.15) {Test result};
+\draw[ink,line width=.55pt] (7.85,5.66)--(14.65,5.66);
+\foreach \y/\metric/\value in {5.22/Hit@1 $\uparrow$/36.94\%,4.70/Hit@5 $\uparrow$/67.07\%,4.18/Hit@10 $\uparrow$/78.61\%,3.66/Hit@20 $\uparrow$/88.89\%,3.14/MRR $\uparrow$/0.50814,2.62/Mean MCES@1 $\downarrow$/6.14830,2.10/Median rank $\downarrow$/2}{
+ \node[anchor=west,inner sep=0,font=\figurefont] at (7.85,\y) {\metric};
+ \node[anchor=east,inner sep=0,font=\brandmedium\figurefont] at (14.65,\y) {\value};}
+% Fixed canvas: 183 x 60.046875 mm. No clipping: overflow is audited.
+\pgfresetboundingbox
+\path[use as bounding box] (0,1.6) rectangle (16,6.85);
+\end{tikzpicture}
+\end{document}

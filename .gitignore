@@ -64,10 +64,26 @@ docs/tpu7x_mig_dws_investigation.md
 # Presentations: track LaTeX/TikZ sources, tooling and notes; ignore compiled
 # outputs, source bundles, copied external material and licensed brand fonts.
 /presentations/**/*.pdf
-!/presentations/assets/novogaia-logo.pdf
-!/presentations/assets/dynamics-modes.pdf
-/presentations/figures/fig-09-dynamics.svg
-/presentations/*.zip
-/presentations/assets/PPNeueMontreal-*
-/presentations/research/md4_ar_sources/
-/presentations/research/novogaia-home.html
+!/presentations/shared/assets/novogaia-logo.pdf
+!/presentations/spectra/assets/dynamics-modes.pdf
+/presentations/spectra/figures/fig-09-dynamics.svg
+/presentations/**/*.zip
+/presentations/**/*.aux
+/presentations/**/*.log
+/presentations/**/*.nav
+/presentations/**/*.out
+/presentations/**/*.snm
+/presentations/**/*.toc
+/presentations/**/*.fls
+/presentations/**/*.fdb_latexmk
+/presentations/**/*.synctex.gz
+/presentations/periodic_semantics/figures/*.svg
+/presentations/shared/assets/PPNeueMontreal-*
+/presentations/spectra/research/md4_ar_sources/
+/presentations/spectra/research/novogaia-home.html
+
+# Small measured inputs needed to regenerate the periodic-semantics figures.
+# Raw inference dumps, run metadata and artifact audits remain local.
+!/presentations/periodic_semantics/research/summary.json
+!/presentations/periodic_semantics/research/training_history.json
+!/presentations/periodic_semantics/research/legacy_*.json

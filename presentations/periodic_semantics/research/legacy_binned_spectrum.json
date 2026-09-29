@@ -1,0 +1,54 @@
+{
+  "encoder": "binned_spectrum",
+  "checkpoint": null,
+  "source_module": "binned",
+  "baselines": {
+    "knn_top1_tanimoto_random": 0.0902690663933754,
+    "knn_top1_tanimoto_precursor_mz": 0.11608650535345078
+  },
+  "layers": {
+    "binned": {
+      "mean": {
+        "auc_maccs_macro": 0.6369045972824097,
+        "auc_elem_N": 0.8543642163276672,
+        "auc_elem_O": 0.7324479222297668,
+        "auc_elem_F": 0.6337130665779114,
+        "auc_elem_P": 0.574745774269104,
+        "auc_elem_S": 0.6390108466148376,
+        "auc_elem_Cl": 0.6553896069526672,
+        "auc_elem_Br": 0.6031071543693542,
+        "auc_fg_hydroxyl": 0.6780799031257629,
+        "auc_fg_carboxyl": 0.5498595237731934,
+        "auc_fg_amine": 0.5841051340103149,
+        "auc_fg_amide": 0.610662579536438,
+        "auc_fg_ester": 0.6793847680091858,
+        "auc_fg_ketone": 0.5454038381576538,
+        "auc_fg_aldehyde": 0.4006326198577881,
+        "auc_fg_aromatic_ring": 0.6132470369338989,
+        "auc_fg_nitro": 0.637843906879425,
+        "auc_fg_sulfonyl": 0.6611714363098145,
+        "auc_fg_phosphate": 0.6256165504455566,
+        "auc_fg_halide": 0.664521336555481,
+        "auc_fg_ether": 0.698602020740509,
+        "auc_fg_thiol": 0.5372612476348877,
+        "auc_fg_nitrile": 0.6384503245353699,
+        "auc_fg_macro": 0.60832279920578,
+        "binary_lambda_over_mean_eig": 10.0,
+        "r2_logp": -0.2772585153579712,
+        "r2_num_rings": -0.37277424335479736,
+        "r2_tpsa": 0.20801573991775513,
+        "r2_fraction_csp3": 0.16603761911392212,
+        "r2_num_aromatic_rings": -0.11245715618133545,
+        "r2_num_hbd": 0.17619192600250244,
+        "r2_num_hba": 0.17036724090576172,
+        "r2_mean": -0.0059824842028319836,
+        "regression_lambda_over_mean_eig": 1.0,
+        "knn_top1_tanimoto": 0.14019131660461426,
+        "knn_top10_tanimoto": 0.12676164507865906,
+        "pair_spearman_tanimoto": 0.0634319856762886,
+        "pair_partial_spearman_tanimoto": 0.04000374674797058
+      }
+    }
+  },
+  "seconds": 9.607385635375977
+}
