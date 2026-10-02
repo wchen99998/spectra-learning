@@ -856,3 +856,33 @@ Tests: `tests/test_dual_jax.py`.
 Not carried over: Thompson-span masking, within-bin offset heads, register
 tokens, the adduct field, the IPA readout, `dualplus`, and the token / CLS /
 FiLM / `pair_in` / `final` metadata sites.
+
+The 1B GH200 configuration is `configs/1b_dual_n32_n64_gh200x16.py`. It uses
+peak-count stages (`num_peaks_schedule`): 31 peaks plus CLS first, then 63 plus
+CLS, in one run.
+
+GPU throughput work for that run, measured on Isambard GH200 nodes at 128
+spectra per GPU:
+
+- `nnx.remat` gave no memory saving in the sharded (multi-GPU) step: the
+  stage-1 step needed 104 GiB with full remat and 99 GiB without. XLA deferred
+  the weight-gradient GEMMs, which feed only the gradient all-reduce, and kept
+  every layer's recomputed activations alive. `activation_checkpoint_mode =
+  "ordered"` (`spectra_learning/models/common_jax.py`) recomputes after the
+  cotangent arrives and releases the input cotangent together with the
+  parameter gradients: 18 GiB at 31 peaks, and 63 peaks fits as well.
+- Pair-path dots return f32 from bf16 inputs. Their f32 cotangents made XLA
+  run the backward GEMMs in fp32, 30% of GPU time. On GPU they now take bf16
+  cotangents (`_acc_dot_general` in `pairmixer_jax.py`): +30% throughput.
+- The fastmixer triangle contraction runs as a batched GEMM on GPU. The
+  broadcast-multiply-reduce form ran out of memory, and a fused reduction was
+  10x slower at 39 or more tokens.
+
+| Peaks | Spectra/s per node | Peak memory | 2-node scaling |
+| --- | ---: | ---: | ---: |
+| 31 | 454 | 26 GB | 93% |
+| 63 | 137 | 73 GB | 97% |
+
+Disabling Triton GEMMs cost 30%; disabling command buffers changed nothing.
+The remaining overhead is mostly layout transposes around the channel-batched
+triangle GEMMs (19% of kernel time).

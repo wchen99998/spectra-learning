@@ -13,7 +13,7 @@ from spectra_learning.models.common_jax import (
     Array,
     Linear,
     RMSNorm,
-    activation_checkpoint_policy,
+    activation_checkpoint,
     assign_param,
     merge_visible_mask,
     should_activation_checkpoint,
@@ -453,11 +453,8 @@ class PeakSetEncoder(nnx.Module):
                     block_idx=block_idx,
                     every_n=self.activation_checkpoint_every_n_layers,
                 ):
-                    x, z = nnx.remat(
-                        _call_pair_mixer_block,
-                        policy=activation_checkpoint_policy(
-                            self.activation_checkpoint_mode
-                        ),
+                    x, z = activation_checkpoint(
+                        _call_pair_mixer_block, self.activation_checkpoint_mode
                     )(block, x, z, token_visible_mask, token_visible_mask)
                 else:
                     x, z = cast(PairMixerBlock, block)(
@@ -593,11 +590,8 @@ class PeakSetEncoder(nnx.Module):
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
             ):
-                x = nnx.remat(
-                    _call_single_mixer_block,
-                    policy=activation_checkpoint_policy(
-                        self.activation_checkpoint_mode
-                    ),
+                x = activation_checkpoint(
+                    _call_single_mixer_block, self.activation_checkpoint_mode
                 )(block, x, token_visible_mask, token_positions, condition)
             else:
                 x = cast(SingleMixerBlock, block)(
@@ -628,11 +622,8 @@ class PeakSetEncoder(nnx.Module):
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
             ):
-                x, z = nnx.remat(
-                    _call_fast_pair_mixer_block,
-                    policy=activation_checkpoint_policy(
-                        self.activation_checkpoint_mode
-                    ),
+                x, z = activation_checkpoint(
+                    _call_fast_pair_mixer_block, self.activation_checkpoint_mode
                 )(block, x, z, idx, compact_token_mask, token_visible_mask)
             else:
                 x, z = block.fastmixer_compact_call(
@@ -674,11 +665,9 @@ class PeakSetEncoder(nnx.Module):
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
             ):
-                x, z = nnx.remat(
+                x, z = activation_checkpoint(
                     _call_fast_pair_mixer_block_compact_only,
-                    policy=activation_checkpoint_policy(
-                        self.activation_checkpoint_mode
-                    ),
+                    self.activation_checkpoint_mode,
                 )(block, x, z, compact_token_mask, idx)
             else:
                 x, z = block.fastmixer_compact_only_call(

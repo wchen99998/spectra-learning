@@ -35,22 +35,20 @@ def _mae_fast_capacities(
     *,
     context_fraction: float | None = None,
     target_fraction: float | None = None,
+    num_peaks: int | None = None,
 ) -> tuple[int, int, int]:
-    num_peaks = int(config.get("num_peaks", DEFAULT_NUM_PEAKS))
+    if num_peaks is None:
+        num_peaks = int(config.get("num_peaks", DEFAULT_NUM_PEAKS))
+    full_visible = num_peaks + _num_cls_tokens(config)
     if str(config.get("mae_objective", "masked_reconstruction")).lower() == (
         "absorbing_diffusion"
     ):
         # K is uniform in 1..N: all targets must fit, including the fully masked case.
-        return (
-            num_peaks - 1 + _num_cls_tokens(config),
-            pairmixer_fast_full_visible_tokens(config),
-            num_peaks,
-        )
+        return num_peaks - 1 + _num_cls_tokens(config), full_visible, num_peaks
     strategies = _mask_strategy_names(
         config.get("jepa_mask_strategy", "contiguous")
     )
     if "all" in strategies or "intensity_aware" in strategies:
-        full_visible = pairmixer_fast_full_visible_tokens(config)
         return full_visible, full_visible, num_peaks
     num_target_blocks = int(config.get("jepa_num_target_blocks", 2))
     context_fraction = (
@@ -120,6 +118,7 @@ def pairmixer_fast_stage_capacities(
             config,
             context_fraction=stage.context_fraction,
             target_fraction=stage.target_fraction,
+            num_peaks=stage.num_peaks,
         )
         for stage in jepa_mask_stages(config)
     )

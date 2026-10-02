@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import cast
+from functools import partial
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +15,7 @@ from spectra_learning.models.common_jax import (
     Array,
     Linear,
     RMSNorm,
-    activation_checkpoint_policy,
+    activation_checkpoint,
     pair_mask,
     scaled_dot_product_attention,
     silu,
@@ -112,12 +113,86 @@ def _dot_precision(dtype: object) -> object | None:
     return jax.lax.Precision.HIGHEST
 
 
+def _acc_dot_general(
+    lhs: Array,
+    rhs: Array,
+    dimension_numbers: Any,
+    precision: Any = None,
+    preferred_element_type: Any = None,
+    **kwargs: Any,
+) -> Array:
+    """``lax.dot_general``; on GPU, bf16 dots with an f32 result keep f32
+    outputs but take bf16 cotangents.
+
+    An f32 output sends an f32 cotangent into the backward, where XLA upcasts
+    the other operand and runs both gradient GEMMs in fp32: 625 of the 1B dual
+    model's backward GEMMs and 30% of its GH200 step. The bf16 cotangent runs
+    them on bf16 tensor cores with fp32 accumulation. Other backends keep
+    plain dots.
+    """
+    if (
+        jax.default_backend() == "gpu"
+        and lhs.dtype == rhs.dtype == jnp.bfloat16
+        and preferred_element_type is not None
+        and jnp.dtype(preferred_element_type) == jnp.float32
+        and not kwargs
+    ):
+        # Hashable for nondiff_argnums.
+        dims = tuple(
+            tuple(tuple(int(axis) for axis in axes) for axes in pair)
+            for pair in dimension_numbers
+        )
+        return _bf16_cotangent_dot(lhs, rhs, dims)
+    return jax.lax.dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _bf16_cotangent_dot(lhs: Array, rhs: Array, dimension_numbers: Any) -> Array:
+    return jax.lax.dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=jnp.float32,
+    )
+
+
+def _bf16_cotangent_dot_fwd(
+    lhs: Array, rhs: Array, dimension_numbers: Any
+) -> tuple[Array, tuple[Array, Array]]:
+    return _bf16_cotangent_dot(lhs, rhs, dimension_numbers), (lhs, rhs)
+
+
+def _bf16_cotangent_dot_bwd(
+    dimension_numbers: Any, residuals: tuple[Array, Array], cotangent: Array
+) -> tuple[Array, Array]:
+    lhs, rhs = residuals
+    _, pullback = jax.vjp(
+        lambda a, b: jax.lax.dot_general(
+            a, b, dimension_numbers, precision=jax.lax.Precision.DEFAULT
+        ),
+        lhs,
+        rhs,
+    )
+    return pullback(cotangent.astype(lhs.dtype))
+
+
+_bf16_cotangent_dot.defvjp(_bf16_cotangent_dot_fwd, _bf16_cotangent_dot_bwd)
+
+
 def _linear_with_preferred_acc(linear: Linear, x: Array) -> Array:
     compute_dtype = linear.compute_dtype
     x = x.astype(compute_dtype)
     weight = linear.weight[...].astype(compute_dtype)
     acc_dtype = _preferred_acc_dtype(compute_dtype)
-    y = jax.lax.dot_general(
+    y = _acc_dot_general(
         x,
         weight,
         dimension_numbers=(
@@ -184,6 +259,29 @@ def _build_pairmixer_transition(
     raise ValueError(
         "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
     )
+
+
+def _triangle_contract(a: Array, b: Array, direction: str) -> Array:
+    """Sum over the third token k: a_ik b_jk (outgoing) or a_ki b_kj (incoming).
+
+    GPU: batched GEMMs with FP32 accumulation. On GH200 the
+    broadcast-multiply-reduce form kept a [B, T, T, T, C] product for the
+    backward pass and ran out of memory at C=1024, 128 spectra per device.
+    Other backends keep the broadcast form.
+    """
+    if jax.default_backend() == "gpu":
+        equation = "bikc,bjkc->bijc" if direction == "outgoing" else "bkic,bkjc->bijc"
+        return jnp.einsum(
+            equation,
+            a,
+            b,
+            precision=_dot_precision(a.dtype),
+            preferred_element_type=_preferred_acc_dtype(a.dtype),
+            _dot_general=_acc_dot_general,
+        ).astype(a.dtype)
+    if direction == "outgoing":
+        return jnp.sum(a[:, :, None, :, :] * b[:, None, :, :, :], axis=3)
+    return jnp.sum(a[:, :, :, None, :] * b[:, :, None, :, :], axis=1)
 
 
 def _active_indices(token_mask: Array, max_active_tokens: int) -> tuple[Array, Array]:
@@ -267,6 +365,7 @@ def _scatter_pair(pair_compact: Array, idx: Array, out_shape: tuple[int, ...]) -
         pair_compact,
         precision=precision,
         preferred_element_type=acc_dtype,
+        _dot_general=_acc_dot_general,
     ).astype(pair_compact.dtype)
     out = jnp.einsum(
         "bilc,blj->bijc",
@@ -274,6 +373,7 @@ def _scatter_pair(pair_compact: Array, idx: Array, out_shape: tuple[int, ...]) -
         selector,
         precision=precision,
         preferred_element_type=acc_dtype,
+        _dot_general=_acc_dot_general,
     )
     return out.astype(pair_compact.dtype).reshape(out_shape)
 
@@ -288,6 +388,7 @@ def _scatter_compact_pair_bias(delta: Array, idx: Array, num_tokens: int) -> Arr
         delta,
         precision=precision,
         preferred_element_type=acc_dtype,
+        _dot_general=_acc_dot_general,
     ).astype(delta.dtype)
     return jnp.einsum(
         "bilh,blj->bijh",
@@ -295,6 +396,7 @@ def _scatter_compact_pair_bias(delta: Array, idx: Array, num_tokens: int) -> Arr
         selector,
         precision=precision,
         preferred_element_type=acc_dtype,
+        _dot_general=_acc_dot_general,
     )
 
 
@@ -1005,6 +1107,7 @@ def _pair_only_triangle_update(
         equation, a * valid, b * valid,
         precision=_dot_precision(a.dtype),
         preferred_element_type=_preferred_acc_dtype(a.dtype),
+        _dot_general=_acc_dot_general,
     ).astype(pair.dtype)
     update = module.p_out(module.norm_out(update))
     return update * jax.nn.sigmoid(module.g_out(normalized)) * valid
@@ -1137,7 +1240,7 @@ def run_pair_only_blocks(
     for index, block in enumerate(blocks, start=1):
         call = _call_pair_only_block
         if checkpoint_mode != "none" and index % checkpoint_every_n == 0:
-            call = nnx.remat(call, policy=activation_checkpoint_policy(checkpoint_mode))
+            call = activation_checkpoint(call, checkpoint_mode)
         pair = call(block, pair, token_mask, condition)
     return pair
 
@@ -1488,16 +1591,9 @@ class PairMixerBlock(nnx.Module):
         a, b = jnp.split(projected, 2, axis=-1)
         if module.direction == "outgoing":
             a = a * token_mask[:, None, :, None].astype(a.dtype)
-            update = jnp.sum(
-                a[:, :, None, :, :] * b[:, None, :, :, :],
-                axis=3,
-            )
         else:
             a = a * token_mask[:, :, None, None].astype(a.dtype)
-            update = jnp.sum(
-                a[:, :, :, None, :] * b[:, :, None, :, :],
-                axis=1,
-            )
+        update = _triangle_contract(a, b, module.direction)
         update = _linear_with_preferred_acc(module.p_out, module.norm_out(update))
         update = update * output_gate
         return update * pair_mask_f
@@ -1578,6 +1674,7 @@ class PairMixerBlock(nnx.Module):
             k,
             precision=_dot_precision(q.dtype),
             preferred_element_type=_preferred_acc_dtype(q.dtype),
+            _dot_general=_acc_dot_general,
         ) / math.sqrt(module.head_dim)
         scores = scores + attn_bias
         attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(v.dtype)
@@ -1587,6 +1684,7 @@ class PairMixerBlock(nnx.Module):
             v,
             precision=_dot_precision(v.dtype),
             preferred_element_type=_preferred_acc_dtype(v.dtype),
+            _dot_general=_acc_dot_general,
         ).astype(v.dtype)
         out = jnp.swapaxes(out, 1, 2).reshape(batch_size, num_tokens, single_dim)
         out = out * jax.nn.sigmoid(_linear_with_preferred_acc(module.g, single_norm))
@@ -1648,6 +1746,7 @@ class PairMixerBlock(nnx.Module):
                 k,
                 precision=_dot_precision(q.dtype),
                 preferred_element_type=_preferred_acc_dtype(q.dtype),
+                _dot_general=_acc_dot_general,
             ).astype(jnp.float32)
             / math.sqrt(module.head_dim)
         )
@@ -1659,6 +1758,7 @@ class PairMixerBlock(nnx.Module):
             v,
             precision=_dot_precision(v.dtype),
             preferred_element_type=_preferred_acc_dtype(v.dtype),
+            _dot_general=_acc_dot_general,
         ).astype(v.dtype)
         out = jnp.swapaxes(out, 1, 2).reshape(batch_size, num_tokens, single_dim)
         out = out * jax.nn.sigmoid(_linear_with_preferred_acc(module.g, single_norm))

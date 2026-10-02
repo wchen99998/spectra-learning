@@ -1565,9 +1565,8 @@ class _JaxTrainingLoop:
         self.stopped_for_time_limit = False
         self.stopped_for_termination = False
         self.use_sjepa = str(config.get("training_task", "")).lower() == "sjepa"
-        self.use_mask_schedule = (
-            isinstance(model, PeakSetJEPAJax)
-            and "jepa_context_fraction_schedule" in config
+        self.use_mask_schedule = isinstance(model, PeakSetJEPAJax) and (
+            "jepa_context_fraction_schedule" in config or "num_peaks_schedule" in config
         )
         self.mask_stages = jepa_mask_stages(config) if self.use_mask_schedule else ()
         self.mask_capacities = (
@@ -1875,6 +1874,7 @@ class _JaxTrainingLoop:
         self.datamodule.set_gradient_accumulation_steps(
             stage.gradient_accumulation_steps
         )
+        self.datamodule.set_num_peaks(stage.num_peaks)
         self.grad_accum_steps = stage.gradient_accumulation_steps
         self.model.set_fastmixer_capacities(
             encoder_tokens,
@@ -1885,7 +1885,7 @@ class _JaxTrainingLoop:
         self.eval_step = self.eval_steps[stage_index]
         self.teacher_target_step = self.teacher_target_steps[stage_index]
         self.mask_stage_index = stage_index
-        if self.config.mae_objective == "absorbing_diffusion":
+        if self.model.mae_objective == "absorbing_diffusion":
             objective_label = "Absorbing diffusion"
             mask_description = (
                 "masked_count=Uniform{1,...,N_valid} context=complement"
@@ -1897,18 +1897,31 @@ class _JaxTrainingLoop:
                 f"target_fraction={stage.target_fraction:.2f}"
             )
         logging.info(
-            "%s mask stage %d: %s "
+            "%s mask stage %d: %s num_peaks=%d "
             "encoder_tokens=%d predictor_tokens=%d target_tokens=%d "
             "accumulation_steps=%d",
             objective_label,
             stage_index + 1,
             mask_description,
+            stage.num_peaks,
             encoder_tokens,
             predictor_tokens,
             target_tokens,
             stage.gradient_accumulation_steps,
         )
         return True
+
+    def _stage_config(self) -> config_dict.ConfigDict:
+        """The config with num_peaks set to the active peak-count stage."""
+        if not self.use_mask_schedule:
+            return self.config
+        num_peaks = self.mask_stages[self.mask_stage_index].num_peaks
+        if num_peaks == self.config.num_peaks:
+            return self.config
+        config = self.config.copy_and_resolve_references()
+        with config.unlocked():
+            config.num_peaks = num_peaks
+        return config
 
     def _restore_checkpoint(self, resume_step: int | None) -> int:
         if resume_step is None:
@@ -2374,7 +2387,7 @@ class _JaxTrainingLoop:
             return
         phase_start = time.perf_counter()
         self.last_msg_probe_metrics = _run_distributed_msg_probe_jax(
-            config=self.config,
+            config=self._stage_config(),
             model=self.model,
             logger=self.logger,
             variants=self.msg_probe_variants,
@@ -2470,6 +2483,7 @@ class _JaxTrainingLoop:
                 train_metrics = host_metrics
         result: dict[str, object] = {
             "run/final_global_step": float(self.global_step),
+            "run/peak_device_memory_bytes": _peak_device_memory_bytes(),
             "run/stopped_for_time_limit": float(self.stopped_for_time_limit),
             "run/stopped_for_termination": float(self.stopped_for_termination),
             "run/wall_elapsed_seconds": wall_elapsed,
@@ -2772,6 +2786,14 @@ def _raise_on_jax_compile_stall(
         f"threshold={threshold_seconds:.2f}s. Enable jax_log_compiles and "
         "jax_explain_cache_misses to inspect the recompilation key."
     )
+
+
+def _peak_device_memory_bytes() -> float:
+    """Largest peak allocation over this process's devices (0 if unreported)."""
+    return float(max(
+        (device.memory_stats() or {}).get("peak_bytes_in_use", 0)
+        for device in jax.local_devices()
+    ))
 
 
 def _jax_data_parallel_devices(config: Any) -> int:

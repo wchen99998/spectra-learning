@@ -14,7 +14,7 @@ from spectra_learning.models.common_jax import (
     Identity,
     Linear,
     RMSNorm,
-    activation_checkpoint_policy,
+    activation_checkpoint,
     assign_param,
     gelu,
     resolve_jax_compute_dtype,
@@ -1292,11 +1292,9 @@ class PeakSetJEPAJax(nnx.Module):
         # every pair - so recomputing them in the backward is usually a better
         # trade than holding them, unlike a per-token head where it is not.
         score = (
-            nnx.remat(
+            activation_checkpoint(
                 _distogram_score_rows,
-                policy=activation_checkpoint_policy(
-                    self.activation_checkpoint_mode
-                ),
+                self.activation_checkpoint_mode,
                 static_argnums=(3,),
             )
             if should_activation_checkpoint(
@@ -1359,11 +1357,8 @@ class PeakSetJEPAJax(nnx.Module):
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
             ):
-                query = nnx.remat(
-                    _call_cross_attention_block,
-                    policy=activation_checkpoint_policy(
-                        self.activation_checkpoint_mode
-                    ),
+                query = activation_checkpoint(
+                    _call_cross_attention_block, self.activation_checkpoint_mode
                 )(
                     block,
                     query,

@@ -165,6 +165,9 @@ class _FakeDataModule:
         self.gradient_accumulation_steps = steps
         self.accumulation_calls.append(steps)
 
+    def set_num_peaks(self, num_peaks: int) -> None:
+        assert num_peaks == self._batch["peak_mz"].shape[1]
+
 
 class _RecordingLogger(MetricLogger):
     def __init__(self) -> None:

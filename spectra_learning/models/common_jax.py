@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 import jax
@@ -47,6 +49,90 @@ def activation_checkpoint_policy(mode: str):
     if mode == "selective":
         return jax.checkpoint_policies.dots_with_no_batch_dims_saveable
     return None
+
+
+def activation_checkpoint(
+    fn: Callable[..., Any],
+    mode: str,
+    *,
+    static_argnums: tuple[int, ...] = (),
+) -> Callable[..., Any]:
+    """Wraps ``fn`` (arrays and nnx modules in, arrays out) for recomputation.
+
+    ``"ordered"`` is full recomputation for multi-device GPU programs. There
+    XLA deferred the weight-gradient GEMMs, which feed only the final
+    all-reduce, and kept every layer's recomputed activations alive until
+    then, so ``jax.checkpoint`` saved no memory. This backward recomputes
+    only once the cotangent arrives and releases the input cotangent together
+    with the parameter gradients, one layer at a time: the 1B dual model's
+    sharded step at 128 spectra per GH200 went from 104 to 18 GiB. Modules
+    called this way must not update their state.
+    """
+    if mode != "ordered":
+        return nnx.remat(
+            fn,
+            policy=activation_checkpoint_policy(mode),
+            static_argnums=static_argnums,
+        )
+    return partial(_ordered_checkpoint_call, fn, static_argnums)
+
+
+def _ordered_checkpoint_call(
+    fn: Callable[..., Any],
+    static_argnums: tuple[int, ...],
+    *args: Any,
+) -> Any:
+    graphdefs = {}
+    dynamic = {}
+    for index, arg in enumerate(args):
+        if index in static_argnums:
+            continue
+        if isinstance(arg, nnx.Module):
+            graphdefs[index], dynamic[index] = nnx.split(arg)
+        else:
+            dynamic[index] = arg
+
+    def pure(dynamic_args: dict[int, Any]) -> Any:
+        call_args = [
+            nnx.merge(graphdefs[index], dynamic_args[index])
+            if index in graphdefs
+            else dynamic_args.get(index, arg)
+            for index, arg in enumerate(args)
+        ]
+        return fn(*call_args)
+
+    return _ordered_checkpoint(pure)(dynamic)
+
+
+def _ordered_checkpoint(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    @jax.custom_vjp
+    def run(inputs: Any) -> Any:
+        return fn(inputs)
+
+    def forward(inputs: Any) -> tuple[Any, Any]:
+        return fn(inputs), inputs
+
+    def backward(inputs: Any, cotangent: Any) -> tuple[Any]:
+        inputs, cotangent = _floating_barrier((inputs, cotangent))
+        _, pullback = jax.vjp(fn, inputs)
+        return _floating_barrier(pullback(cotangent))
+
+    run.defvjp(forward, backward)
+    return run
+
+
+def _floating_barrier(tree: Any) -> Any:
+    """``optimization_barrier`` over the floating-point leaves of ``tree``."""
+    leaves, treedef = jax.tree.flatten(tree)
+    floating = [
+        index
+        for index, leaf in enumerate(leaves)
+        if jnp.issubdtype(jnp.result_type(leaf), jnp.floating)
+    ]
+    held = jax.lax.optimization_barrier([leaves[index] for index in floating])
+    for index, leaf in zip(floating, held, strict=True):
+        leaves[index] = leaf
+    return jax.tree.unflatten(treedef, leaves)
 
 
 def should_activation_checkpoint(
