@@ -1,6 +1,7 @@
 # Pair→single information flow with pair distogram supervision
 
-Research date: 2026-10-01. Status: waves 1–6 are complete.
+Research date: 2026-10-01. Status: waves 1–9 are complete (wave 9's R=32 run is still
+training).
 
 **Answer (seed 0):** add a pair distogram loss on the encoder pairs, and keep
 three pair→single paths: the attention bias, mean pair values, and the
@@ -9,9 +10,25 @@ this joint model beats single-only, pair-only and the old joint recipe on
 every metric, at both 2 Da and 0.1 Da (Section 8, wave 5; Section 10, wave 6).
 Using 0.1 Da m/z bins adds a further +0.03–0.07 MACCS AUC.
 
+**Current best recipe**, with the joint model's single-readout AUC on test /
+confirm:
+
+| Step | Single AUC (test / confirm) | Section |
+| --- | --- | --- |
+| `dual_bias_mean_gated`, C=256 | — | — |
+| + 0.1 Da bins | 0.731 / 0.719 | 10 |
+| + metadata as a CLS "precursor node" whose edges carry each peak's neutral loss (`cls_edge`) | 0.742 / 0.727 | 11 |
+
+`cls_edge` also cuts MAE by 0.059 and distogram loss by 0.056, raises pair
+AUC to 0.763 / 0.741, and keeps retrieval. Within-bin regression heads
+(Section 12) learn sub-bin position, but at 0.1 Da they change probe scores by
+at most 0.005, which is within plausible seed noise. They clearly help only
+with coarse 2 Da bins.
+
 Code:
 `scripts/pair_single_dual_pilot.py`, `scripts/pair_single_dual_eval.py`,
-`scripts/report_pair_single_dual.py`, `tests/test_pair_single_dual_pilot.py`.
+`scripts/pair_single_dual_metadata.py`, `scripts/report_pair_single_dual.py`,
+`tests/test_pair_single_dual_pilot.py`.
 
 ## 1. Question
 
@@ -564,7 +581,219 @@ Its distogram margin over pair-only is small (−0.008 here, −0.009 at 2 Da) a
 seed 0 only. Multi-seed confirmation of the distogram and confirm-set pair-AUC
 margins is the remaining check.
 
-## 11. Reproduction
+## 11. Metadata injection (wave 7; seed 0, C=256, Δ=0.1 Da)
+
+**Starting point.** The pilot so far gives the encoder only one piece of
+metadata: the precursor $P$, inside the pair features. These are
+$d_{ij}/P$, the complement $m_i+m_j-P$, and $m_i/P$. Production is uneven.
+Pair-only (pair279m) applies AdaLN-Zero to every pair block. The joint
+fastmixer path, however, passes no condition to its blocks, so
+`metadata_conditioning="adaln_zero"` reduces to a modulation of the final
+single norm only. The pair stream never sees it.
+
+**Condition vector.** The production `massive_v2_acquisition_v1` layout
+(28 values) is filled from MassSpecGym:
+
+- precursor m/z;
+- collision energy ($/100$, clipped; present in 53% of spectra);
+- instrument family (Orbitrap / QTOF / unknown);
+- constant charge 1 and positive polarity.
+
+Training uses the production 10% per-field dropout
+(`scripts/pair_single_dual_metadata.py`). An embedding
+$c = W_2\,\mathrm{SiLU}(W_1 m)$ feeds one zero-initialised head per site, so
+every arm starts exactly at the no-metadata model (tested). The sites are:
+
+| Site | Update |
+| --- | --- |
+| `token` (production additive) | $s_i \mathrel{+}= H c$ for all peaks and CLS, before the pair embedder reads singles |
+| `cls` | $s_{\text{cls}} \mathrel{+}= Hc$ |
+| `pair_in` | $z_{ij} \mathrel{+}= Hc$ |
+| `film_single`, `film_pair` | at every block input, $x \leftarrow x\odot(1+\gamma_\ell(c)) + \beta_\ell(c)$ |
+| `final` (production joint AdaLN) | the same modulation after the final single norm |
+| `cls_edge` (precursor node) | $z_{i,\text{cls}}, z_{\text{cls},i} \mathrel{+}= \mathrm{MLP}\big(\phi(P-m_i),\,(P-m_i)/1000,\,m_i/P\big) + Hc$ |
+
+`cls_edge` turns CLS into the precursor. Each of its edges carries that peak's
+neutral loss $\ell_i = P - m_i$, with Fourier features down to 0.01 Da. A
+triangle update over $(i,\text{cls},j)$ then compares the losses directly,
+since $\ell_i - \ell_j = m_j - m_i$.
+
+**Evaluation additions.** All arms are scored with metadata present.
+
+- *Blind*: the same model is also scored with every field absent, so its
+  features carry no metadata.
+- *Isomer retrieval*: candidates are restricted to library molecules within
+  10 ppm of the query's neutral mass, so precursor mass cannot solve the task.
+  Only 4,719 test queries and 478 confirm queries have two or more candidates,
+  and the sets are tiny (top-10 is always 100%). This metric is therefore
+  noisy.
+- *Control*: the raw metadata vector is appended to the base model's readouts.
+
+| Arm | MAE | dist | sAUC t / c | pAUC t / c | s@1 t / c | blind MAE | blind sAUC t |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: |
+| base (no metadata) | 4.157 | 3.357 | 0.731 / 0.719 | 0.748 / 0.732 | 26.8 / 40.2 | — | — |
+| precursor removed from pair features | 4.157 | 3.373 | 0.716 / 0.703 | 0.730 / 0.720 | 23.5 / 33.6 | — | — |
+| `final` | 4.147 | 3.360 | 0.739 / 0.725 | 0.752 / 0.730 | 26.7 / 39.8 | 4.154 | 0.733 |
+| `token` | 4.128 | 3.340 | **0.745** / 0.729 | 0.759 / 0.736 | 24.0 / 33.8 | 4.161 | 0.736 |
+| `cls` | 4.131 | 3.337 | 0.743 / **0.735** | 0.760 / 0.737 | 24.0 / 35.3 | 4.163 | 0.732 |
+| `pair_in` | 4.151 | 3.341 | 0.740 / 0.728 | 0.759 / 0.737 | 24.0 / 33.9 | 4.184 | 0.731 |
+| `token+pair_in` | 4.138 | 3.345 | 0.744 / 0.727 | 0.757 / 0.740 | 25.0 / 37.6 | 4.168 | 0.732 |
+| `film_single` | 4.123 | 3.355 | 0.743 / 0.727 | 0.759 / 0.740 | 24.1 / 34.8 | 4.142 | 0.729 |
+| `film_pair` | 4.125 | 3.356 | 0.743 / 0.728 | 0.762 / 0.739 | 25.1 / 36.4 | 4.155 | 0.731 |
+| `film_single+film_pair` | 4.137 | 3.345 | 0.742 / 0.727 | 0.760 / 0.741 | 24.5 / 34.3 | 4.170 | 0.732 |
+| **`cls_edge`** | **4.098** | **3.301** | 0.742 / 0.727 | **0.763 / 0.741** | **26.9** / 39.7 | 4.158 | 0.729 |
+| pair-only, native AdaLN-Zero | — | 3.360 | — | 0.735 / 0.714 | — | — | — |
+| pair-only, no metadata | — | 3.364 | — | 0.737 / 0.721 | — | — | — |
+
+Control, with metadata appended to the base readouts: single 0.735 / 0.723
+(+0.004), pair 0.750 / 0.734 (+0.002), retrieval unchanged. Metadata alone
+scores 0.637 / 0.624.
+
+Findings:
+
+1. **Every site helps chemistry by more than the control:** +0.008 to +0.014
+   single AUC and up to +0.015 pair AUC, against +0.002 to +0.004 from simply
+   appending metadata. The encoder uses the condition to interpret fragments.
+   It is not merely forwarding the condition to the probe.
+2. **`cls_edge` is best overall.** It gives the lowest MAE (−0.059), the lowest
+   distogram loss (−0.056) and the best pair AUC, and it keeps retrieval.
+3. **Retrieval is the trade-off for the other sites.** `token`, `cls`,
+   `pair_in` and FiLM lose 2–6 pp top-1. Collision energy and instrument
+   differ between spectra of the same molecule, so injecting them into every
+   token pulls those embeddings apart. Blind features recover 26–27% top-1.
+   `cls_edge` and `final` keep retrieval because the condition stays on CLS
+   edges or on one final affine map.
+4. **Missing metadata is safe.** Blind MAE and AUC return to the base model's
+   level, an effect of the 10% field dropout.
+5. **The precursor-relative pair features matter:** removing them costs
+   −0.015 AUC and −3 pp retrieval.
+6. **Production's per-block AdaLN-Zero does not help pair-only at 20k steps.**
+   With `cls_edge`, the joint model now leads pair-only on distogram by 0.06.
+7. **GPU runs are deterministic.** The rerun base reproduced wave 6 exactly, so
+   there is no run-to-run noise. Seed variance is still unmeasured.
+
+**Speed note.** Step time is about 60–65 ms on a GH200 for batch 32, 64 and
+128, and 121 ms for batch 256. Host masking takes 1.3 ms. The step is
+latency-bound, so data parallelism over 2 GPUs would not shorten it. Running
+two runs per GPU nearly doubles throughput.
+
+## 12. Within-bin regression heads (wave 8; seed 0, C=256, base + `cls_edge`)
+
+A value $x$ in bin $k=\lfloor x/\Delta\rfloor$ also has a within-bin position
+$u = x/\Delta - k \in [0,1)$. Classification discards $u$; at 0.1 Da it
+carries mass-defect detail down to the instrument's mDa precision. A
+`BinOffsetHead` predicts
+
+$$
+\hat u_k(h) = \sigma\!\big(w_k^\top g(h) + b_k\big),\qquad
+\mathcal L_{\text{off}} = \lambda\,\mathbb E\,|\hat u_{k^\star}(h) - u| ,
+$$
+
+with per-bin rows $w_k, b_k$ on a shared feature $g(h)=\mathrm{SiLU}(Ah)$.
+Only the true bin's row $k^\star$ is gathered, so the cost does not grow
+with $K$. Zero rows start every prediction at the bin centre. The `mz` head
+reads the predictor's masked-peak latents. The `dist` head reads the
+distogram pair features of each supervised pair.
+
+Offset errors are in bin units. Predicting the bin centre for uniformly
+placed values scores 0.25. A per-bin bias alone can already beat that, so
+part of the gain is a per-bin prior.
+
+| Arm | MAE | dist | m/z offset | dist offset | sAUC t / c | pAUC t / c | s@1 t / c |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| base + `cls_edge`, 0.1 Da | 4.098 | 3.301 | — | — | 0.742 / 0.727 | 0.763 / 0.741 | 26.9 / 39.7 |
+| + mz | 4.099 | 3.322 | 0.147 | — | 0.743 / 0.728 | 0.761 / 0.741 | 26.6 / 40.4 |
+| + dist | 4.100 | 3.311 | — | 0.122 | 0.744 / 0.731 | 0.761 / 0.743 | 25.5 / 36.6 |
+| + both, λ=0.3 | 4.104 | 3.303 | 0.150 | 0.126 | **0.747 / 0.731** | **0.766** / 0.745 | 26.2 / 38.8 |
+| + both, λ=1 | 4.104 | 3.309 | 0.144 | 0.122 | 0.741 / 0.728 | 0.764 / **0.747** | 27.0 / 41.0 |
+| + both, λ=3 | 4.114 | 3.332 | 0.140 | 0.117 | 0.747 / 0.728 | 0.764 / 0.741 | 26.3 / 39.6 |
+| base + `cls_edge`, 0.2 Da | 3.642 | 3.105 | — | — | 0.738 / 0.723 | 0.761 / 0.741 | 26.1 / 38.6 |
+| + both, λ=1 | 3.636 | 3.101 | 0.104 | 0.081 | 0.740 / 0.723 | 0.763 / 0.741 | 25.9 / 39.5 |
+| base + `cls_edge`, 2 Da | 2.475 | 2.187 | — | — | 0.698 / 0.683 | 0.728 / 0.708 | 25.4 / 38.5 |
+| + both, λ=1 | **2.453** | **2.162** | 0.167 | 0.180 | **0.707 / 0.697** | **0.740 / 0.726** | **26.8 / 39.9** |
+| pair-only, 0.1 Da, + dist | — | 3.378 | — | 0.127 | — | 0.738 / 0.720 | — |
+| base + `cls_edge` + adduct field | 4.134 | 3.321 | — | — | 0.741 / 0.729 | 0.761 / 0.743 | 25.6 / 38.0 |
+| base + `cls_edge` + `film_pair` | 4.108 | 3.304 | — | — | 0.741 / 0.723 | 0.762 / 0.742 | 27.4 / **42.9** |
+
+(Bold marks the best value within each bin size.)
+
+Findings:
+
+1. **The heads learn sub-bin position.** At 0.1 Da, the m/z offset error is
+   0.14–0.15 bins (about 14 mDa) and the distance offset error is 0.12 bins
+   (about 12 mDa), against 0.25 for bin-centre guessing.
+2. **At fine bins they barely change the representation.** Both heads move
+   AUC by at most +0.005 and retrieval by ±1.5 pp. These effects are within
+   plausible seed noise. The distance head alone costs 3 pp of confirm
+   retrieval. λ=0.3–1 is the safe range. At λ=3 the distogram loss worsens
+   by +0.031.
+3. **At coarse bins they clearly help.** At 2 Da the regression adds
+   +0.009 / +0.014 single AUC, +0.012 / +0.017 pair AUC, +1.4 pp retrieval, and
+   lowers both cross-entropies. That recovers only about 20–30% of the gap to
+   0.1 Da bins (0.742 / 0.763), so fine bins remain the main lever.
+4. **Pair-only does not benefit:** pair AUC 0.738 / 0.720 against
+   0.737 / 0.721.
+5. **Metadata follow-ups.** Adding the adduct field does not help
+   (MAE +0.036, −1.3 pp retrieval). `cls_edge + film_pair` keeps AUC and
+   raises confirm retrieval by 3.2 pp. That is worth a seed check.
+6. **The end-to-end m/z mDa error logged in this wave is not usable.** It
+   averaged over misclassified bins, which can be tens of Da off. The metric
+   is now computed only over correctly binned targets, together with
+   `mz_bin_accuracy`.
+
+**Recommendation.** Keep 0.1 Da bins and `cls_edge`. The both-heads variant at
+λ=0.3–1 is optional: it is cheap (no measurable slowdown) and adds sub-bin
+m/z / distance predictions, but its probe gains are not yet distinguishable
+from noise. The next step is multi-seed confirmation of
+base → `cls_edge` → `cls_edge` + heads.
+
+Throughput: with two runs per GPU, each runs at about 7.1 sps, against 12 sps
+alone. That is 1.18× aggregate at C=256, less than the 1.7× seen at C=128.
+
+## 13. Register tokens (wave 9; seed 0, base + `cls_edge`, C=256, 0.1 Da)
+
+R learned register tokens are appended to the joint encoder axis after
+compaction, at RoPE positions 32, 33, …. They get learned pair rows and
+columns ($z_{i,r}$, $z_{r,j}$, and a shared $z_{r,r'}$) and join every block.
+As with ViT registers, they are dropped before the predictors and readouts,
+so they can only serve as scratch space for the peaks and CLS. They use their
+own RNG stream, so the rest of the model initialises exactly as without
+registers. The R=0 run comes from wave 7.
+
+The training encoder axis is the 20-token compact capacity (19 visible peaks
+plus CLS). The export axis is 32 (31 peaks plus CLS), so both cannot be
+aligned at once.
+
+| R | Train / export tokens | MAE | dist | sAUC t / c | pAUC t / c | s@1 t / c | sps |
+| ---: | --- | ---: | ---: | --- | --- | --- | ---: |
+| 0 | 20 / 32 | 4.098 | **3.301** | 0.742 / 0.727 | **0.763** / 0.741 | **26.9 / 39.7** | 11.9 |
+| 1 | 21 / 33 | **4.085** | 3.308 | 0.743 / 0.730 | 0.761 / 0.744 | 26.3 / 38.5 | 10.5 |
+| 2 | 22 / 34 | 4.114 | 3.326 | 0.743 / **0.732** | 0.761 / 0.744 | 23.5 / 33.8 | 10.8 |
+| 4 | 24 / 36 | 4.104 | 3.305 | 0.743 / 0.724 | 0.760 / 0.738 | 26.6 / 39.0 | 10.5 |
+| 8 | 28 / 40 | 4.115 | 3.307 | **0.746** / 0.731 | 0.758 / 0.744 | 25.9 / 37.1 | 8.0 |
+| 12 | **32** / 44 | 4.095 | 3.315 | 0.742 / 0.725 | 0.761 / 0.742 | 25.2 / 38.2 | 7.3 |
+| 32 | 52 / **64** | running | | | | | 2.6 |
+| 44 | **64** / 76 | out of memory (68 GB allocation at batch 128) | | | | | — |
+
+Findings:
+
+1. **Registers do not help.** Every R ≤ 12 lies within ±0.005 AUC of R=0,
+   with no trend in R. That is within plausible seed noise.
+2. **Retrieval drops** by 0.3–3.4 pp (test) and 0.7–5.9 pp (confirm), with no
+   offsetting gain in MAE or distogram loss.
+3. **Registers cost speed:** −12% at R=1–4, −33% at R=8 and −39% at R=12.
+   Even R=1 is slower, because every block now carries an extra pair row
+   and column.
+4. **Aligned totals give no speed-up.** 32 training tokens (R=12) is slower
+   than 28 (R=8). Step time grows with token count: the pair tensor scales
+   as $T^2$ and the triangle updates as $T^3$. The earlier "latency-bound"
+   measurement (Section 11) varied only batch size, at T=20.
+
+Registers are not adopted. In this architecture the pair stream already
+provides $O(T^2)$ scratch state, and CLS (with `cls_edge`) is a global token,
+which plausibly covers what registers supply in ViTs.
+
+## 14. Reproduction
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -m scripts.pair_single_dual_pilot \
@@ -576,5 +805,28 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -m scripts.pair_single_dual
 .venv/bin/python -m scripts.report_pair_single_dual runs --csv pair_single_dual.csv
 ```
 
+Current best recipe with metadata, optional offset heads and registers:
+
+```bash
+.venv/bin/python -m scripts.pair_single_dual_metadata \
+  --panel artifacts/pair_to_single_20260930/panel.npz \
+  --output artifacts/pair_single_dual_20261001/msg_metadata.npz
+XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -m scripts.pair_single_dual_pilot \
+  --arm dual_bias_mean_gated --seed 0 --steps 20000 --pair-dim 256 --mz-bin-size 0.1 \
+  --metadata artifacts/pair_single_dual_20261001/msg_metadata.npz \
+  --meta-fields precursor+ce+instrument --meta-sites cls_edge \
+  [--offset-heads mz+dist --offset-weight 0.3] [--registers 4] \
+  --inputs artifacts/pair_to_single_20260930/panel.npz \
+  --confirmation artifacts/pair_to_single_long_20260930/confirmation_panel.npz \
+  --output runs/best_s0
+.venv/bin/python -m scripts.pair_single_dual_eval --inputs artifacts/pair_to_single_20260930/panel.npz \
+  --metadata artifacts/pair_single_dual_20261001/msg_metadata.npz runs/best_s0
+```
+
 Isambard launcher: `~/spectra-p2s/p2s_queue.sbatch` (`SPECS="arm:seed …"`,
-`SLOTS` runs per GPU). Outputs go to `/scratch/u6rb/wuhao.u6rb/p2s/wave1`.
+`SLOTS` runs per GPU). Outputs for each wave are under
+`/scratch/u6rb/wuhao.u6rb/p2s/` (`wave1`, `wave2`, `wave3_ts`, `wave4_bins`,
+`wave5_pd256`, `wave6_pd256_bin01`, `wave7_meta_sites`, `wave8_offsets`,
+`wave9_registers`). Evaluation JSON files are copied to
+`artifacts/pair_single_dual_20261001/<wave>/`. Tests and evaluation run as
+Slurm jobs, never on the login node.
