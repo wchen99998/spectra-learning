@@ -1,0 +1,42 @@
+{
+  "status": "completed_measurements_populated",
+  "expected_slides": 7,
+  "run": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+  "checkpoint_step": 831000,
+  "slide_plan": [
+    {
+      "slide": 1,
+      "purpose": "Measured overall finding; populated only after comparison artifacts exist"
+    },
+    {
+      "slide": 2,
+      "purpose": "Native final-token readout and raw19 SAE branches; editable computational diagram"
+    },
+    {
+      "slide": 3,
+      "purpose": "Final-token mean vs attention MACCS and functional-group AUROC"
+    },
+    {
+      "slide": 4,
+      "purpose": "Paired molecule-bootstrap diffusion minus baseline differences"
+    },
+    {
+      "slide": 5,
+      "purpose": "SAE reconstruction and frozen candidate chemical associations"
+    },
+    {
+      "slide": 6,
+      "purpose": "Verified lineage, nominal exposure and native m/z quantization confounds"
+    },
+    {
+      "slide": 7,
+      "purpose": "Evidence, reproducibility and causal limits"
+    }
+  ],
+  "primary_protocol": "Macro AUROC from arithmetic mean of three independently trained readout logits; same fixed train/test-supported targets; physical tokens exclude CLS and padding.",
+  "sae_protocol": "Raw19; three separate TopK8192-feature fits k32seed0,k32seed1,k64seed0. Train-only normalization, validation-selected checkpoint, chemistry candidates frozen from train/validation before test.",
+  "numerical_placeholders": false,
+  "result_build_guard": "prepare_results.py requires completed result JSON and native/cache parity before writing results.tex",
+  "provenance_artifact": "artifacts/encoder_chemistry_20260930/diffusion_extension/provenance_summary.json",
+  "provenance_sha256": "623ffc50b7b3f635c6b77af7be890c656efd89c830984bab37fc843ea44071e8"
+}

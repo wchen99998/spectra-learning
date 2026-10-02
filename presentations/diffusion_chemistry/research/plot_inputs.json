@@ -1,0 +1,4044 @@
+{
+  "schema": "diffusion_chemistry_presentation_inputs_v1",
+  "scope": "Exact subsets of completed artifacts used by every plot, numeric caption and protocol claim; no fitting or bootstrap recomputation.",
+  "readout": {
+    "schema": "diffusion_final_token_readout_comparison_v1",
+    "arms": [
+      "parent_1190k",
+      "periodic_1209k",
+      "diffusion_831k"
+    ],
+    "test_molecules": 1024,
+    "native_state": 27,
+    "token_scope": "valid physical peaks, excluding CLS",
+    "primary_endpoint": "Final physical-token attention MACCS macro AUROC",
+    "secondary_endpoints": "Mean-token linear control, functional groups, elements, and per-concept metrics",
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "bootstrap_replicates": 1000,
+    "bootstrap_seed": 20260930,
+    "ensemble": "Mean of three seed logits before AUROC; separately report mean of three seed metrics. No test-selected seed.",
+    "support_policy": "Same fixed targets for all encoders/readouts: at least5 positives and5 negatives in train AND test. Exact half-credit for tied scores.",
+    "bootstrap_policy": "Shared multinomial molecule counts across all three encoders, both readouts and all seeds. A macro replicate is undefined if any fixed target loses a class; omit the entire group replicate and report its count. Targets never vary across bootstrap replicates.",
+    "uncertainty_scope": "Conditional on three fixed pretrained checkpoints and fitted readouts. Descriptive unadjusted percentile intervals; no p-values, no pretraining-run uncertainty, no upstream-exposure claim.",
+    "causal_scope": "Checkpoint comparison, not an isolated training-objective experiment. Training duration, initialization, optimization and native input quantization can differ; molecular labels and downstream panel/readout budgets are shared.",
+    "score_losses": "Balanced BCE/Brier use sigmoid scores from class-balanced readouts; they are not calibrated prevalence probabilities.",
+    "groups": {
+      "MACCS": {
+        "targets": 145,
+        "names": [
+          "maccs_008",
+          "maccs_011",
+          "maccs_015",
+          "maccs_016",
+          "maccs_017",
+          "maccs_019",
+          "maccs_022",
+          "maccs_023",
+          "maccs_024",
+          "maccs_025",
+          "maccs_026",
+          "maccs_028",
+          "maccs_029",
+          "maccs_032",
+          "maccs_033",
+          "maccs_034",
+          "maccs_036",
+          "maccs_037",
+          "maccs_038",
+          "maccs_039",
+          "maccs_040",
+          "maccs_041",
+          "maccs_042",
+          "maccs_043",
+          "maccs_045",
+          "maccs_046",
+          "maccs_047",
+          "maccs_048",
+          "maccs_049",
+          "maccs_050",
+          "maccs_051",
+          "maccs_052",
+          "maccs_053",
+          "maccs_054",
+          "maccs_055",
+          "maccs_056",
+          "maccs_057",
+          "maccs_058",
+          "maccs_059",
+          "maccs_060",
+          "maccs_061",
+          "maccs_062",
+          "maccs_063",
+          "maccs_064",
+          "maccs_065",
+          "maccs_066",
+          "maccs_067",
+          "maccs_068",
+          "maccs_069",
+          "maccs_070",
+          "maccs_071",
+          "maccs_072",
+          "maccs_073",
+          "maccs_074",
+          "maccs_075",
+          "maccs_076",
+          "maccs_077",
+          "maccs_078",
+          "maccs_079",
+          "maccs_080",
+          "maccs_081",
+          "maccs_082",
+          "maccs_083",
+          "maccs_084",
+          "maccs_085",
+          "maccs_086",
+          "maccs_087",
+          "maccs_088",
+          "maccs_089",
+          "maccs_090",
+          "maccs_091",
+          "maccs_092",
+          "maccs_093",
+          "maccs_094",
+          "maccs_095",
+          "maccs_096",
+          "maccs_097",
+          "maccs_098",
+          "maccs_099",
+          "maccs_100",
+          "maccs_101",
+          "maccs_102",
+          "maccs_103",
+          "maccs_104",
+          "maccs_105",
+          "maccs_106",
+          "maccs_107",
+          "maccs_108",
+          "maccs_109",
+          "maccs_110",
+          "maccs_111",
+          "maccs_112",
+          "maccs_113",
+          "maccs_114",
+          "maccs_115",
+          "maccs_116",
+          "maccs_117",
+          "maccs_118",
+          "maccs_119",
+          "maccs_120",
+          "maccs_121",
+          "maccs_122",
+          "maccs_123",
+          "maccs_124",
+          "maccs_125",
+          "maccs_126",
+          "maccs_127",
+          "maccs_128",
+          "maccs_129",
+          "maccs_130",
+          "maccs_131",
+          "maccs_132",
+          "maccs_133",
+          "maccs_134",
+          "maccs_135",
+          "maccs_136",
+          "maccs_137",
+          "maccs_138",
+          "maccs_139",
+          "maccs_140",
+          "maccs_141",
+          "maccs_142",
+          "maccs_143",
+          "maccs_144",
+          "maccs_145",
+          "maccs_146",
+          "maccs_147",
+          "maccs_148",
+          "maccs_149",
+          "maccs_150",
+          "maccs_151",
+          "maccs_152",
+          "maccs_153",
+          "maccs_154",
+          "maccs_155",
+          "maccs_156",
+          "maccs_157",
+          "maccs_158",
+          "maccs_159",
+          "maccs_160",
+          "maccs_161",
+          "maccs_162",
+          "maccs_163",
+          "maccs_164",
+          "maccs_165"
+        ]
+      },
+      "functional_groups": {
+        "targets": 13,
+        "names": [
+          "fg_hydroxyl",
+          "fg_carboxyl",
+          "fg_amine",
+          "fg_amide",
+          "fg_ester",
+          "fg_ketone",
+          "fg_aromatic_ring",
+          "fg_nitro",
+          "fg_sulfonyl",
+          "fg_phosphate",
+          "fg_halide",
+          "fg_ether",
+          "fg_nitrile"
+        ]
+      },
+      "elements": {
+        "targets": 7,
+        "names": [
+          "elem_N",
+          "elem_O",
+          "elem_F",
+          "elem_P",
+          "elem_S",
+          "elem_Cl",
+          "elem_Br"
+        ]
+      }
+    },
+    "models": {
+      "parent_1190k/depth27/mean": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.795590817544326,
+              "ci95": [
+                0.7854231931583472,
+                0.8045435122748962
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7954435596742471,
+              "ci95": [
+                0.7852636634653845,
+                0.8043974616881001
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7957389479735232,
+              0.7952461415390856,
+              0.7953455895101329
+            ],
+            "ensemble_balanced_bce": 0.5851355057621838,
+            "ensemble_balanced_brier": 0.1949989643993127
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.8029254285791799,
+              "ci95": [
+                0.78104206475181,
+                0.8223633282585593
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.8027796679780297,
+              "ci95": [
+                0.7809743993394276,
+                0.8222388871701515
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.8027419314518843,
+              0.8025659073704255,
+              0.8030311651117797
+            ],
+            "ensemble_balanced_bce": 0.6051331913673222,
+            "ensemble_balanced_brier": 0.1964993767797804
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.9015291133815264,
+              "ci95": [
+                0.8803700221763732,
+                0.9178136706630152
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.9015145528394125,
+              "ci95": [
+                0.8805036592891198,
+                0.9179345526501095
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.9008297708987758,
+              0.9017638635674156,
+              0.9019500240520466
+            ],
+            "ensemble_balanced_bce": 0.43746166289663485,
+            "ensemble_balanced_brier": 0.13828007390508418
+          }
+        }
+      },
+      "parent_1190k/depth27/attention": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.7987356079135781,
+              "ci95": [
+                0.7889211609949248,
+                0.8077746951403287
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7982042807485124,
+              "ci95": [
+                0.7883628965448004,
+                0.8072636765864266
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7986115717254529,
+              0.7982915917216186,
+              0.7977096787984653
+            ],
+            "ensemble_balanced_bce": 0.5825046042394895,
+            "ensemble_balanced_brier": 0.19403169331457543
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.8056343074543845,
+              "ci95": [
+                0.7830633886234365,
+                0.8256625476787242
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.8052964463020237,
+              "ci95": [
+                0.7827630144203831,
+                0.825405257050902
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.8048681391821858,
+              0.8058684056364069,
+              0.805152794087478
+            ],
+            "ensemble_balanced_bce": 0.6031162958325669,
+            "ensemble_balanced_brier": 0.19506195295415077
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.903304747637757,
+              "ci95": [
+                0.8812858270035099,
+                0.9201524903767766
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.9029468641332873,
+              "ci95": [
+                0.8811599053506612,
+                0.9196402268682102
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.9025333229204625,
+              0.9028063477853808,
+              0.9035009216940182
+            ],
+            "ensemble_balanced_bce": 0.4422084974606846,
+            "ensemble_balanced_brier": 0.14049430088703177
+          }
+        }
+      },
+      "periodic_1209k/depth27/mean": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.7711658148414502,
+              "ci95": [
+                0.7608472649671818,
+                0.7811150802672103
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7709591807382784,
+              "ci95": [
+                0.7606547540468751,
+                0.7809261747275428
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7709845100585202,
+              0.7709179290997864,
+              0.7709751030565287
+            ],
+            "ensemble_balanced_bce": 0.6285507428455624,
+            "ensemble_balanced_brier": 0.20898077350291372
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.7736070988106047,
+              "ci95": [
+                0.7512334229711722,
+                0.7948255042425872
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7732885958016126,
+              "ci95": [
+                0.7508154253233936,
+                0.7945384201154354
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7729485797625935,
+              0.7729068856114141,
+              0.77401032203083
+            ],
+            "ensemble_balanced_bce": 0.6560736449470771,
+            "ensemble_balanced_brier": 0.21433310399940853
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.8794564727948858,
+              "ci95": [
+                0.8535873955852283,
+                0.9001201492692037
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.8792802457435018,
+              "ci95": [
+                0.8533588114561056,
+                0.9000266255610906
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.8785616648866482,
+              0.8800016134988005,
+              0.8792774588450569
+            ],
+            "ensemble_balanced_bce": 0.49755720630531414,
+            "ensemble_balanced_brier": 0.1542789177657429
+          }
+        }
+      },
+      "periodic_1209k/depth27/attention": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.7749804145137779,
+              "ci95": [
+                0.7653614970960044,
+                0.7850349048353099
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7741887755591275,
+              "ci95": [
+                0.764519414520056,
+                0.7842908237291325
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7739454601634927,
+              0.774075228914966,
+              0.7745456375989235
+            ],
+            "ensemble_balanced_bce": 0.6108843459731879,
+            "ensemble_balanced_brier": 0.20505136810711505
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.7767454114667655,
+              "ci95": [
+                0.7549077555624649,
+                0.7975217931666968
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.775794816527248,
+              "ci95": [
+                0.7541254594586239,
+                0.7966028344702416
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7738427479255611,
+              0.7751660386623426,
+              0.7783756629938409
+            ],
+            "ensemble_balanced_bce": 0.6435509746113368,
+            "ensemble_balanced_brier": 0.21183568501159034
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.8794640090883403,
+              "ci95": [
+                0.8526408598007287,
+                0.9018689661733782
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.8788250483421313,
+              "ci95": [
+                0.8515801558237663,
+                0.9008504592929137
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.8772555289267489,
+              0.8798206402964404,
+              0.8793989758032045
+            ],
+            "ensemble_balanced_bce": 0.4951106467083945,
+            "ensemble_balanced_brier": 0.15338079685894238
+          }
+        }
+      },
+      "diffusion_831k/depth27/mean": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.7227351151692742,
+              "ci95": [
+                0.7131424706210039,
+                0.7329040413385012
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7219605805570483,
+              "ci95": [
+                0.7124374060062957,
+                0.7321191830738815
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7225597363530387,
+              0.7216788527756249,
+              0.7216431525424811
+            ],
+            "ensemble_balanced_bce": 0.6598711557658339,
+            "ensemble_balanced_brier": 0.22661806602158502
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.7339597161715299,
+              "ci95": [
+                0.7100423106316263,
+                0.7557798645445666
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7331668031620029,
+              "ci95": [
+                0.7093424845393753,
+                0.7549408412539755
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7344662441358655,
+              0.7332255161311486,
+              0.7318086492189947
+            ],
+            "ensemble_balanced_bce": 0.6572293142361685,
+            "ensemble_balanced_brier": 0.22369827570201475
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.8064069626914102,
+              "ci95": [
+                0.7872162962554259,
+                0.8249999233801727
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.8055553774148919,
+              "ci95": [
+                0.7864176228130328,
+                0.8241285989311117
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.8045829278466962,
+              0.8061751299992697,
+              0.8059080743987099
+            ],
+            "ensemble_balanced_bce": 0.5612137713619495,
+            "ensemble_balanced_brier": 0.19157349446131375
+          }
+        }
+      },
+      "diffusion_831k/depth27/attention": {
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.7243762222239358,
+              "ci95": [
+                0.7141743070952841,
+                0.734622605591546
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7211316107082011,
+              "ci95": [
+                0.7110031276295301,
+                0.7312607844427865
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7208978054172235,
+              0.7228144875131608,
+              0.719682539194219
+            ],
+            "ensemble_balanced_bce": 0.6496887730211489,
+            "ensemble_balanced_brier": 0.22452767469147633
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.7338828741577389,
+              "ci95": [
+                0.7112566959979799,
+                0.7566634757912521
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7301313646257219,
+              "ci95": [
+                0.7079572081244083,
+                0.7524764579722076
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7326367157950517,
+              0.7297378031634909,
+              0.7280195749186235
+            ],
+            "ensemble_balanced_bce": 0.6522293240261032,
+            "ensemble_balanced_brier": 0.2231421266874246
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.8022942942095345,
+              "ci95": [
+                0.7800948059508535,
+                0.8222636031113437
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.7983588835904589,
+              "ci95": [
+                0.7766131295770825,
+                0.8179853633936238
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_metrics": [
+              0.7980782940026125,
+              0.7974294712230278,
+              0.7995688855457368
+            ],
+            "ensemble_balanced_bce": 0.5705081430822292,
+            "ensemble_balanced_brier": 0.1945539507037289
+          }
+        }
+      }
+    },
+    "contrasts": {
+      "diffusion_831k_minus_parent_1190k_attention": {
+        "left": "diffusion_831k/depth27/attention",
+        "right": "parent_1190k/depth27/attention",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": -0.07435938568964238,
+              "ci95": [
+                -0.08245451359945467,
+                -0.06605560952442281
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.07707267004031122,
+              "ci95": [
+                -0.08492402919951801,
+                -0.06888703292478042
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": -0.07175143329664556,
+              "ci95": [
+                -0.09375875231673399,
+                -0.05218999633322449
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.07516508167630155,
+              "ci95": [
+                -0.0968350055514197,
+                -0.055810900983323565
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": -0.10101045342822271,
+              "ci95": [
+                -0.1206284834695408,
+                -0.08299735641746127
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.10458798054282817,
+              "ci95": [
+                -0.12414388079516792,
+                -0.08679438946493484
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "diffusion_831k_minus_parent_1190k_mean": {
+        "left": "diffusion_831k/depth27/mean",
+        "right": "parent_1190k/depth27/mean",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": -0.07285570237505176,
+              "ci95": [
+                -0.0798859044620348,
+                -0.06547310734486635
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.07348297911719893,
+              "ci95": [
+                -0.08046722769180988,
+                -0.06604194192549466
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": -0.06896571240764991,
+              "ci95": [
+                -0.09092180932892081,
+                -0.051356424726016925
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.06961286481602692,
+              "ci95": [
+                -0.09160445926021532,
+                -0.05202121569013058
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": -0.09512215069011612,
+              "ci95": [
+                -0.11412358095317698,
+                -0.075976602182499
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.09595917542452062,
+              "ci95": [
+                -0.11479345424043284,
+                -0.07723463850790857
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "diffusion_831k_minus_periodic_1209k_attention": {
+        "left": "diffusion_831k/depth27/attention",
+        "right": "periodic_1209k/depth27/attention",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": -0.050604192289842136,
+              "ci95": [
+                -0.0582529793018721,
+                -0.042674228229193034
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.05305716485092641,
+              "ci95": [
+                -0.06057102992852643,
+                -0.04528043131018205
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": -0.042862537309026665,
+              "ci95": [
+                -0.061708886068118154,
+                -0.02569012163563194
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.04566345190152614,
+              "ci95": [
+                -0.0642015868201642,
+                -0.028997035613350666
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": -0.077169714878806,
+              "ci95": [
+                -0.09923327559485133,
+                -0.052102096889911145
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.08046616475167222,
+              "ci95": [
+                -0.10247888492330794,
+                -0.05540702247261878
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "diffusion_831k_minus_periodic_1209k_mean": {
+        "left": "diffusion_831k/depth27/mean",
+        "right": "periodic_1209k/depth27/mean",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": -0.048430699672175885,
+              "ci95": [
+                -0.0556856706801693,
+                -0.04052230715340002
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.04899860018123017,
+              "ci95": [
+                -0.05636929433455792,
+                -0.041130922150796806
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": -0.03964738263907485,
+              "ci95": [
+                -0.06184746072906962,
+                -0.0220312953255425
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.04012179263960958,
+              "ci95": [
+                -0.061814578220143676,
+                -0.022576072895632817
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": -0.07304951010347545,
+              "ci95": [
+                -0.09563016751824455,
+                -0.049654628984646676
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.07372486832860999,
+              "ci95": [
+                -0.0961811851034082,
+                -0.050038509916361884
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "attention_minus_mean_parent_1190k": {
+        "left": "parent_1190k/depth27/attention",
+        "right": "parent_1190k/depth27/mean",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.003144790369252148,
+              "ci95": [
+                0.0012476694399142757,
+                0.005191066783257728
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.0027607210742651147,
+              "ci95": [
+                0.0008791129340488257,
+                0.004840296458433391
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.0027088788752046224,
+              "ci95": [
+                -0.001699842221646405,
+                0.007152253649781217
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.002516778323993748,
+              "ci95": [
+                -0.002003458873643676,
+                0.007104294939417315
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 0.0017756342562307134,
+              "ci95": [
+                -0.003524994372349803,
+                0.007296309154388119
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.0014323112938746663,
+              "ci95": [
+                -0.003647060871854234,
+                0.006784356298022092
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "attention_minus_mean_periodic_1209k": {
+        "left": "periodic_1209k/depth27/attention",
+        "right": "periodic_1209k/depth27/mean",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.0038145996723277804,
+              "ci95": [
+                0.0005823295771330674,
+                0.006899989385441995
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.003229594820849045,
+              "ci95": [
+                7.136537036865279e-06,
+                0.006310253255092947
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": 0.0031383126561607987,
+              "ci95": [
+                -0.007325044569214136,
+                0.013004884598631016
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": 0.002506220725635683,
+              "ci95": [
+                -0.00786198026303569,
+                0.012334502087790022
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": 7.5362934546875844e-06,
+              "ci95": [
+                -0.006213989173595842,
+                0.005902315119887823
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.0004551974013706455,
+              "ci95": [
+                -0.006388301823991638,
+                0.005409290971675951
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      },
+      "attention_minus_mean_diffusion_831k": {
+        "left": "diffusion_831k/depth27/attention",
+        "right": "diffusion_831k/depth27/mean",
+        "direction": "left minus right; positive favors left AUROC",
+        "groups": {
+          "MACCS": {
+            "ensemble": {
+              "estimate": 0.001641107054661528,
+              "ci95": [
+                -0.0002540782074020679,
+                0.003758018241813174
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.0008289698488471792,
+              "ci95": [
+                -0.0026774155368118626,
+                0.0012666864915954514
+              ],
+              "valid_bootstrap_replicates": 980,
+              "undefined_bootstrap_replicates": 20,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "functional_groups": {
+            "ensemble": {
+              "estimate": -7.684201379101537e-05,
+              "ci95": [
+                -0.005508588274357863,
+                0.0052067883788136475
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.00303543853628088,
+              "ci95": [
+                -0.008291421543863722,
+                0.002214676184120267
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          },
+          "elements": {
+            "ensemble": {
+              "estimate": -0.004112668481875874,
+              "ci95": [
+                -0.011294114583026234,
+                0.0023301772971862783
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            },
+            "seed_mean_metric": {
+              "estimate": -0.007196493824432881,
+              "ci95": [
+                -0.014107576219749035,
+                -0.0010138659646853811
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        }
+      }
+    },
+    "panel_sha256": {
+      "inputs.npz": "b961f0ac838fcc4b89592422d360667f58efe6fc40fa0126859292f51d1d05f0",
+      "labels.npz": "1abc355c2feb266e731d2927531917624b464d49643f564f398b66148351f77f",
+      "manifest.json": "0bb4fced4403bda0dc1639f0e46d6670cc3092de3bbd421d9c24d0d11912378c",
+      "matched_controls.npz": "6e8664a4481002eca6bf2aadc4cfa5d88e11bb1043639ec447c53dc9f2ee26ff"
+    },
+    "analysis_source_sha256": "47c6762d8a3d33365d45364ddaa31dca62cea03cfba7918f478aa94b873a1da5"
+  },
+  "sae": {
+    "diffusion_arm": "diffusion_831k",
+    "selection_policy": "Unchanged original selector: train/validation only, up to2 features each for6 fixed concepts, no test filtering. Matched8192 random dictionary and2048 dense-channel/fixed-SAE-subset controls.",
+    "frozen_primary_records": [
+      {
+        "feature": 4682,
+        "concept": "fg_hydroxyl",
+        "concept_index": 7
+      },
+      {
+        "feature": 3317,
+        "concept": "fg_hydroxyl",
+        "concept_index": 7
+      },
+      {
+        "feature": 6996,
+        "concept": "fg_halide",
+        "concept_index": 18
+      }
+    ],
+    "quality": [
+      {
+        "encoder": "parent_1190k",
+        "k": 32,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.8463214641207942,
+            "relative_l2": 0.06786117518503111,
+            "centered_relative_l2": 0.3920185402238085,
+            "normalized_mse": 0.15367853704383708,
+            "mean_l0": 31.995758932680264,
+            "dead_fraction_on_split": 0.0
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.7270576614491167,
+            "relative_l2": 0.08816682776084006,
+            "centered_relative_l2": 0.5224388371387442,
+            "normalized_mse": 0.2669207600595565,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.0089111328125
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.728230229980326,
+            "relative_l2": 0.08756587939905093,
+            "centered_relative_l2": 0.5213154227717361,
+            "normalized_mse": 0.2637152875788167,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.01220703125
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "parent_1190k",
+        "k": 32,
+        "seed": 1,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.8463255821551554,
+            "relative_l2": 0.06784228319075532,
+            "centered_relative_l2": 0.39201328784219114,
+            "normalized_mse": 0.15367440871424812,
+            "mean_l0": 31.998144535374102,
+            "dead_fraction_on_split": 0.0
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.7263156797845227,
+            "relative_l2": 0.08830858410018294,
+            "centered_relative_l2": 0.523148468616202,
+            "normalized_mse": 0.2679124513581832,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.0125732421875
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.7273253683270231,
+            "relative_l2": 0.08774694821672266,
+            "centered_relative_l2": 0.5221825654624797,
+            "normalized_mse": 0.2647946291805513,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.011474609375
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "parent_1190k",
+        "k": 64,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.8624837488955273,
+            "relative_l2": 0.06419360732169888,
+            "centered_relative_l2": 0.3708318366921491,
+            "normalized_mse": 0.13751625214662044,
+            "mean_l0": 63.99072266446501,
+            "dead_fraction_on_split": 0.0
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.7537396473064801,
+            "relative_l2": 0.08374656631803204,
+            "centered_relative_l2": 0.4962462621456406,
+            "normalized_mse": 0.24082742480509184,
+            "mean_l0": 64.00000003539026,
+            "dead_fraction_on_split": 0.0
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.7544874864381483,
+            "relative_l2": 0.08322832538838763,
+            "centered_relative_l2": 0.4954921932400667,
+            "normalized_mse": 0.2382362214659665,
+            "mean_l0": 64.00000036647543,
+            "dead_fraction_on_split": 0.000244140625
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "periodic_1209k",
+        "k": 32,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9303658351557027,
+            "relative_l2": 0.0439976578369993,
+            "centered_relative_l2": 0.2638828619753419,
+            "normalized_mse": 0.06963416852809046,
+            "mean_l0": 31.993833105364015,
+            "dead_fraction_on_split": 0.002197265625
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.8880682359939587,
+            "relative_l2": 0.05440113908953024,
+            "centered_relative_l2": 0.3345620480658876,
+            "normalized_mse": 0.1061685992628052,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.05908203125
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.890880706680881,
+            "relative_l2": 0.053802150043631106,
+            "centered_relative_l2": 0.33033209550257,
+            "normalized_mse": 0.10403631448361393,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.0616455078125
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "periodic_1209k",
+        "k": 32,
+        "seed": 1,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9310757448583848,
+            "relative_l2": 0.04374284914525353,
+            "centered_relative_l2": 0.2625342932677847,
+            "normalized_mse": 0.06892425848858341,
+            "mean_l0": 31.99404878569752,
+            "dead_fraction_on_split": 0.0029296875
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.8890312530322279,
+            "relative_l2": 0.054149896659209794,
+            "centered_relative_l2": 0.33311971867148926,
+            "normalized_mse": 0.10527540558488899,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.0643310546875
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.8919191838490849,
+            "relative_l2": 0.05359727136329164,
+            "centered_relative_l2": 0.3287564693673953,
+            "normalized_mse": 0.103248711363633,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.062744140625
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "periodic_1209k",
+        "k": 64,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9417604077400686,
+            "relative_l2": 0.040237179942747316,
+            "centered_relative_l2": 0.24132880528426645,
+            "normalized_mse": 0.05823959534092778,
+            "mean_l0": 63.97503314139906,
+            "dead_fraction_on_split": 0.0
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.9038346844352187,
+            "relative_l2": 0.05042437800668347,
+            "centered_relative_l2": 0.31010532979099414,
+            "normalized_mse": 0.0912139368287577,
+            "mean_l0": 64.00000003539026,
+            "dead_fraction_on_split": 0.005126953125
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.9063710961145324,
+            "relative_l2": 0.04983722227412983,
+            "centered_relative_l2": 0.3059884048219272,
+            "normalized_mse": 0.08926749608703581,
+            "mean_l0": 64.00000036647543,
+            "dead_fraction_on_split": 0.0052490234375
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "diffusion_831k",
+        "k": 32,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9533457144610592,
+            "relative_l2": 0.2083238038467226,
+            "centered_relative_l2": 0.21599603130368117,
+            "normalized_mse": 0.04665428412688455,
+            "mean_l0": 31.99999237473829,
+            "dead_fraction_on_split": 0.031005859375
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.9232988194846751,
+            "relative_l2": 0.26737447346745546,
+            "centered_relative_l2": 0.2769497797712157,
+            "normalized_mse": 0.0931399817625319,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.105224609375
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.9277678724539583,
+            "relative_l2": 0.2594990546127144,
+            "centered_relative_l2": 0.26876035337460347,
+            "normalized_mse": 0.0859414332417538,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.10693359375
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "diffusion_831k",
+        "k": 32,
+        "seed": 1,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9533282186257186,
+            "relative_l2": 0.2083654168151491,
+            "centered_relative_l2": 0.21603652787036126,
+            "normalized_mse": 0.0466717813430236,
+            "mean_l0": 31.99999237473829,
+            "dead_fraction_on_split": 0.0277099609375
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.9226599831692366,
+            "relative_l2": 0.26848681431019916,
+            "centered_relative_l2": 0.2781007314459338,
+            "normalized_mse": 0.09392271991689013,
+            "mean_l0": 32.00000001769513,
+            "dead_fraction_on_split": 0.1026611328125
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.9272832307280027,
+            "relative_l2": 0.26036501888362434,
+            "centered_relative_l2": 0.269660470354847,
+            "normalized_mse": 0.0865014920975876,
+            "mean_l0": 32.00000018323772,
+            "dead_fraction_on_split": 0.1029052734375
+          }
+        },
+        "selected_epoch": 40
+      },
+      {
+        "encoder": "diffusion_831k",
+        "k": 64,
+        "seed": 0,
+        "quality": {
+          "train": {
+            "tokens": 96635,
+            "fve_vs_train_mean": 0.9616578985982583,
+            "relative_l2": 0.18885612786216374,
+            "centered_relative_l2": 0.1958113924207211,
+            "normalized_mse": 0.03834210024126508,
+            "mean_l0": 63.99643555512389,
+            "dead_fraction_on_split": 0.0155029296875
+          },
+          "val": {
+            "tokens": 23045,
+            "fve_vs_train_mean": 0.9363644567205461,
+            "relative_l2": 0.24353915581406033,
+            "centered_relative_l2": 0.25226086355091604,
+            "normalized_mse": 0.07727408236321637,
+            "mean_l0": 64.00000003539026,
+            "dead_fraction_on_split": 0.0335693359375
+          },
+          "test": {
+            "tokens": 22474,
+            "fve_vs_train_mean": 0.940351199947479,
+            "relative_l2": 0.2358150029993036,
+            "centered_relative_l2": 0.24423103826606682,
+            "normalized_mse": 0.07096985153035787,
+            "mean_l0": 64.00000036647543,
+            "dead_fraction_on_split": 0.033935546875
+          }
+        },
+        "selected_epoch": 40
+      }
+    ],
+    "chemical_confirmation": {
+      "parent_1190k": {
+        "selection_sha256": "bee642830ff6ee714262365e130f04c379a77345774f46d36d3efbecdc03de98",
+        "families": {
+          "sae": {
+            "fg_amide": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.5961079055425806,
+              "records": [
+                {
+                  "feature": 2164,
+                  "concept": "fg_amide",
+                  "test": {
+                    "positive": 522,
+                    "negative": 502,
+                    "auroc": 0.5843179008105509,
+                    "average_precision": 0.5932966113482011,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.7654320987654321,
+                    "recall": 0.23754789272030652,
+                    "f1": 0.36257309941520466,
+                    "predicted_positive": 162
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.031890672052007664,
+                      "precursor_mz": 0.028724783784291337,
+                      "processed_peak_count": 0.0815017855886193,
+                      "collision_energy": -0.1204213656868303
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 401,
+                    "unique_donors": 278,
+                    "positive_anchors": 218,
+                    "negative_anchors": 183,
+                    "accuracy": 0.5773067331670823,
+                    "balanced_anchor_accuracy": 0.577680854263799,
+                    "ties": 295,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 7370,
+                  "concept": "fg_amide",
+                  "test": {
+                    "positive": 522,
+                    "negative": 502,
+                    "auroc": 0.6078979102746104,
+                    "average_precision": 0.6041195773411063,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.6831683168316832,
+                    "recall": 0.39655172413793105,
+                    "f1": 0.5018181818181818,
+                    "predicted_positive": 303
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.030869667704297145,
+                      "precursor_mz": -0.03453016458413527,
+                      "processed_peak_count": 0.18979350316384344,
+                      "collision_energy": -0.032929823029068196
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 401,
+                    "unique_donors": 278,
+                    "positive_anchors": 218,
+                    "negative_anchors": 183,
+                    "accuracy": 0.5623441396508728,
+                    "balanced_anchor_accuracy": 0.5626033990073696,
+                    "ties": 217,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_amine": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            },
+            "fg_hydroxyl": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.6199297859357478,
+              "records": [
+                {
+                  "feature": 3678,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.6151749785605911,
+                    "average_precision": 0.48768106157890234,
+                    "threshold": 2.755187749862671,
+                    "comparison_operator": ">",
+                    "precision": 0.44064386317907445,
+                    "recall": 0.5887096774193549,
+                    "f1": 0.5040276179516686,
+                    "predicted_positive": 497
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.10682320687537682,
+                      "precursor_mz": 0.10907786991993373,
+                      "processed_peak_count": 0.5415221997951057,
+                      "collision_energy": 0.10419910515751356
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.5613382899628253,
+                    "balanced_anchor_accuracy": 0.5588291019325502,
+                    "ties": 82,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 2182,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.6246845933109045,
+                    "average_precision": 0.47611842180501757,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.514367816091954,
+                    "recall": 0.48118279569892475,
+                    "f1": 0.49722222222222223,
+                    "predicted_positive": 348
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.13783785762270193,
+                      "precursor_mz": 0.14030437764924933,
+                      "processed_peak_count": 0.35967932830214544,
+                      "collision_energy": -0.1313888106937991
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.5947955390334573,
+                    "balanced_anchor_accuracy": 0.5955538714159404,
+                    "ties": 152,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_halide": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.6769941850142045,
+              "records": [
+                {
+                  "feature": 738,
+                  "concept": "fg_halide",
+                  "test": {
+                    "positive": 320,
+                    "negative": 704,
+                    "auroc": 0.6906205610795454,
+                    "average_precision": 0.44039786441851847,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.4419889502762431,
+                    "recall": 0.75,
+                    "f1": 0.5561993047508691,
+                    "predicted_positive": 543
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.23902266144255505,
+                      "precursor_mz": -0.23935800044063657,
+                      "processed_peak_count": 0.28601352585590717,
+                      "collision_energy": 0.1689051969387134
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 396,
+                    "unique_donors": 273,
+                    "positive_anchors": 167,
+                    "negative_anchors": 229,
+                    "accuracy": 0.6464646464646465,
+                    "balanced_anchor_accuracy": 0.6469027011479225,
+                    "ties": 84,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 4407,
+                  "concept": "fg_halide",
+                  "test": {
+                    "positive": 320,
+                    "negative": 704,
+                    "auroc": 0.6633678089488636,
+                    "average_precision": 0.44591687788345313,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.4432773109243697,
+                    "recall": 0.659375,
+                    "f1": 0.5301507537688442,
+                    "predicted_positive": 476
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.048046335683181327,
+                      "precursor_mz": -0.04916195557383379,
+                      "processed_peak_count": 0.2976735373339399,
+                      "collision_energy": 0.1018402573266594
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 396,
+                    "unique_donors": 273,
+                    "positive_anchors": 167,
+                    "negative_anchors": 229,
+                    "accuracy": 0.6047979797979798,
+                    "balanced_anchor_accuracy": 0.6023651387181967,
+                    "ties": 107,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_nitrile": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.52380037568306,
+              "records": [
+                {
+                  "feature": 6482,
+                  "concept": "fg_nitrile",
+                  "test": {
+                    "positive": 48,
+                    "negative": 976,
+                    "auroc": 0.5036501024590163,
+                    "average_precision": 0.04563934070530719,
+                    "threshold": 4.683577537536621,
+                    "comparison_operator": ">",
+                    "precision": 0.040697674418604654,
+                    "recall": 0.14583333333333334,
+                    "f1": 0.06363636363636363,
+                    "predicted_positive": 172
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.20066675388946742,
+                      "precursor_mz": -0.20320095873248523,
+                      "processed_peak_count": 0.4099646428120489,
+                      "collision_energy": 0.22231029704614422
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 82,
+                    "unique_donors": 44,
+                    "positive_anchors": 22,
+                    "negative_anchors": 60,
+                    "accuracy": 0.40853658536585363,
+                    "balanced_anchor_accuracy": 0.4159090909090909,
+                    "ties": 39,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 2652,
+                  "concept": "fg_nitrile",
+                  "test": {
+                    "positive": 48,
+                    "negative": 976,
+                    "auroc": 0.5439506489071039,
+                    "average_precision": 0.07010132467674812,
+                    "threshold": 3.1042688488960266,
+                    "comparison_operator": ">",
+                    "precision": 0.057692307692307696,
+                    "recall": 0.125,
+                    "f1": 0.07894736842105263,
+                    "predicted_positive": 104
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.14540537187811092,
+                      "precursor_mz": -0.14854583488655357,
+                      "processed_peak_count": 0.21959846425791013,
+                      "collision_energy": 0.19437874600776311
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 82,
+                    "unique_donors": 44,
+                    "positive_anchors": 22,
+                    "negative_anchors": 60,
+                    "accuracy": 0.49390243902439024,
+                    "balanced_anchor_accuracy": 0.503030303030303,
+                    "ties": 59,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_sulfonyl": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.6087351539251573,
+              "records": [
+                {
+                  "feature": 1347,
+                  "concept": "fg_sulfonyl",
+                  "test": {
+                    "positive": 127,
+                    "negative": 897,
+                    "auroc": 0.6228372791193744,
+                    "average_precision": 0.17116478343988978,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.20298507462686566,
+                    "recall": 0.5354330708661418,
+                    "f1": 0.2943722943722944,
+                    "predicted_positive": 335
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.23332744495381627,
+                      "precursor_mz": -0.237798665248019,
+                      "processed_peak_count": 0.2117468568430806,
+                      "collision_energy": 0.04117899138732379
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 229,
+                    "unique_donors": 134,
+                    "positive_anchors": 75,
+                    "negative_anchors": 154,
+                    "accuracy": 0.5720524017467249,
+                    "balanced_anchor_accuracy": 0.5740909090909091,
+                    "ties": 88,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 2360,
+                  "concept": "fg_sulfonyl",
+                  "test": {
+                    "positive": 127,
+                    "negative": 897,
+                    "auroc": 0.5946330287309404,
+                    "average_precision": 0.17559557613211602,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.21800947867298578,
+                    "recall": 0.36220472440944884,
+                    "f1": 0.27218934911242604,
+                    "predicted_positive": 211
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.0996626636397542,
+                      "precursor_mz": 0.09984406180459385,
+                      "processed_peak_count": 0.11052910449906715,
+                      "collision_energy": -0.05960436273964168
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 229,
+                    "unique_donors": 134,
+                    "positive_anchors": 75,
+                    "negative_anchors": 154,
+                    "accuracy": 0.5829694323144105,
+                    "balanced_anchor_accuracy": 0.5822077922077922,
+                    "ties": 121,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "periodic_1209k": {
+        "selection_sha256": "23256bf1212fc55fac45c08bb46d577ce504214eefb6276b11d6ca470fcd635f",
+        "families": {
+          "sae": {
+            "fg_amide": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.5773887209781563,
+              "records": [
+                {
+                  "feature": 6122,
+                  "concept": "fg_amide",
+                  "test": {
+                    "positive": 522,
+                    "negative": 502,
+                    "auroc": 0.5673398360580666,
+                    "average_precision": 0.5611493515031227,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.5483359746434231,
+                    "recall": 0.6628352490421456,
+                    "f1": 0.6001734605377277,
+                    "predicted_positive": 631
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.043022075667001496,
+                      "precursor_mz": -0.045802169191301645,
+                      "processed_peak_count": 0.3741994239218797,
+                      "collision_energy": 0.13957739033579783
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 401,
+                    "unique_donors": 278,
+                    "positive_anchors": 218,
+                    "negative_anchors": 183,
+                    "accuracy": 0.5324189526184538,
+                    "balanced_anchor_accuracy": 0.5291585200782072,
+                    "ties": 97,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 5287,
+                  "concept": "fg_amide",
+                  "test": {
+                    "positive": 522,
+                    "negative": 502,
+                    "auroc": 0.587437605898246,
+                    "average_precision": 0.5748204739741241,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.6528662420382165,
+                    "recall": 0.39272030651340994,
+                    "f1": 0.4904306220095694,
+                    "predicted_positive": 314
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.11961092116875442,
+                      "precursor_mz": -0.1234208857675894,
+                      "processed_peak_count": 0.18522719400550505,
+                      "collision_energy": 0.0025257779048488377
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 401,
+                    "unique_donors": 278,
+                    "positive_anchors": 218,
+                    "negative_anchors": 183,
+                    "accuracy": 0.5822942643391521,
+                    "balanced_anchor_accuracy": 0.5824873414548554,
+                    "ties": 187,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_amine": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            },
+            "fg_hydroxyl": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.5931841232930932,
+              "records": [
+                {
+                  "feature": 1823,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.5957537601424896,
+                    "average_precision": 0.5023090295990177,
+                    "threshold": 1.471459686756134,
+                    "comparison_operator": ">",
+                    "precision": 0.42115768463073855,
+                    "recall": 0.5672043010752689,
+                    "f1": 0.4833906071019473,
+                    "predicted_positive": 501
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.0766923014979355,
+                      "precursor_mz": 0.07750787357980114,
+                      "processed_peak_count": 0.5470548887738159,
+                      "collision_energy": 0.09145565088939854
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.570631970260223,
+                    "balanced_anchor_accuracy": 0.5701970443349753,
+                    "ties": 111,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 1372,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.5906144864436969,
+                    "average_precision": 0.4854592167696931,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.5234042553191489,
+                    "recall": 0.33064516129032256,
+                    "f1": 0.4052718286655684,
+                    "predicted_positive": 235
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.07866466080918143,
+                      "precursor_mz": 0.08182625509294851,
+                      "processed_peak_count": 0.4749774459498665,
+                      "collision_energy": 0.13248922732639593
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.550185873605948,
+                    "balanced_anchor_accuracy": 0.550587343690792,
+                    "ties": 216,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_halide": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.6537586558948864,
+              "records": [
+                {
+                  "feature": 7363,
+                  "concept": "fg_halide",
+                  "test": {
+                    "positive": 320,
+                    "negative": 704,
+                    "auroc": 0.6750776811079546,
+                    "average_precision": 0.5127382979383097,
+                    "threshold": 0.7728852331638336,
+                    "comparison_operator": ">",
+                    "precision": 0.5014005602240896,
+                    "recall": 0.559375,
+                    "f1": 0.5288035450516987,
+                    "predicted_positive": 357
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.07567379238688927,
+                      "precursor_mz": -0.07748039994340152,
+                      "processed_peak_count": 0.07859377063924136,
+                      "collision_energy": 0.15741177323232824
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 396,
+                    "unique_donors": 273,
+                    "positive_anchors": 167,
+                    "negative_anchors": 229,
+                    "accuracy": 0.648989898989899,
+                    "balanced_anchor_accuracy": 0.651517924848992,
+                    "ties": 132,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 1707,
+                  "concept": "fg_halide",
+                  "test": {
+                    "positive": 320,
+                    "negative": 704,
+                    "auroc": 0.6324396306818181,
+                    "average_precision": 0.4452255512308123,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.4854368932038835,
+                    "recall": 0.46875,
+                    "f1": 0.4769475357710652,
+                    "predicted_positive": 309
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.24728918092530108,
+                      "precursor_mz": -0.247209817315057,
+                      "processed_peak_count": 0.06828592543960824,
+                      "collision_energy": -0.0006353360021469606
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 396,
+                    "unique_donors": 273,
+                    "positive_anchors": 167,
+                    "negative_anchors": 229,
+                    "accuracy": 0.6363636363636364,
+                    "balanced_anchor_accuracy": 0.6341160473812201,
+                    "ties": 150,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_nitrile": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.5134317366803278,
+              "records": [
+                {
+                  "feature": 3348,
+                  "concept": "fg_nitrile",
+                  "test": {
+                    "positive": 48,
+                    "negative": 976,
+                    "auroc": 0.49581625683060115,
+                    "average_precision": 0.04584201813276557,
+                    "threshold": 6.55730414390564,
+                    "comparison_operator": ">",
+                    "precision": 0.03636363636363636,
+                    "recall": 0.08333333333333333,
+                    "f1": 0.05063291139240506,
+                    "predicted_positive": 110
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.2548412226169549,
+                      "precursor_mz": -0.26075815239270794,
+                      "processed_peak_count": 0.2999146209899629,
+                      "collision_energy": 0.23749857208266043
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 82,
+                    "unique_donors": 44,
+                    "positive_anchors": 22,
+                    "negative_anchors": 60,
+                    "accuracy": 0.47560975609756095,
+                    "balanced_anchor_accuracy": 0.47613636363636364,
+                    "ties": 28,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 6208,
+                  "concept": "fg_nitrile",
+                  "test": {
+                    "positive": 48,
+                    "negative": 976,
+                    "auroc": 0.5310472165300546,
+                    "average_precision": 0.053033134257415356,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.054140127388535034,
+                    "recall": 0.3541666666666667,
+                    "f1": 0.09392265193370165,
+                    "predicted_positive": 314
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.3263465175479059,
+                      "precursor_mz": -0.3311683222128587,
+                      "processed_peak_count": 0.44314911359835224,
+                      "collision_energy": 0.6494780337478585
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 82,
+                    "unique_donors": 44,
+                    "positive_anchors": 22,
+                    "negative_anchors": 60,
+                    "accuracy": 0.5,
+                    "balanced_anchor_accuracy": 0.4856060606060606,
+                    "ties": 56,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_sulfonyl": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.63643904879783,
+              "records": [
+                {
+                  "feature": 5160,
+                  "concept": "fg_sulfonyl",
+                  "test": {
+                    "positive": 127,
+                    "negative": 897,
+                    "auroc": 0.5675611618781766,
+                    "average_precision": 0.16478127165845957,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.16896551724137931,
+                    "recall": 0.3858267716535433,
+                    "f1": 0.23501199040767387,
+                    "predicted_positive": 290
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.09646165626446375,
+                      "precursor_mz": -0.09637863381489195,
+                      "processed_peak_count": 0.09387125780187988,
+                      "collision_energy": -0.06010054722587533
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 229,
+                    "unique_donors": 134,
+                    "positive_anchors": 75,
+                    "negative_anchors": 154,
+                    "accuracy": 0.5218340611353712,
+                    "balanced_anchor_accuracy": 0.5196536796536797,
+                    "ties": 111,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 3055,
+                  "concept": "fg_sulfonyl",
+                  "test": {
+                    "positive": 127,
+                    "negative": 897,
+                    "auroc": 0.7053169357174834,
+                    "average_precision": 0.25982748525118105,
+                    "threshold": 3.7579376697540283,
+                    "comparison_operator": ">",
+                    "precision": 0.2929936305732484,
+                    "recall": 0.36220472440944884,
+                    "f1": 0.323943661971831,
+                    "predicted_positive": 157
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.0004748352527141622,
+                      "precursor_mz": -0.004587619887873854,
+                      "processed_peak_count": -0.019862772413949473,
+                      "collision_energy": 0.31693031522551485
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 229,
+                    "unique_donors": 134,
+                    "positive_anchors": 75,
+                    "negative_anchors": 154,
+                    "accuracy": 0.6703056768558951,
+                    "balanced_anchor_accuracy": 0.6813419913419914,
+                    "ties": 25,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "diffusion_831k": {
+        "selection_sha256": "74a45b2f8b02d272b666ed2659c82e81c36fce0206ccc492aee5512782924341",
+        "families": {
+          "sae": {
+            "fg_amide": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            },
+            "fg_amine": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            },
+            "fg_hydroxyl": {
+              "selected_features": 2,
+              "mean_test_auroc": 0.6897490764562306,
+              "records": [
+                {
+                  "feature": 4682,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.7443515403390725,
+                    "average_precision": 0.6368686406064679,
+                    "threshold": 4.521727561950684,
+                    "comparison_operator": ">",
+                    "precision": 0.5081669691470054,
+                    "recall": 0.7526881720430108,
+                    "f1": 0.6067172264355363,
+                    "predicted_positive": 551
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.5989280205573657,
+                      "precursor_mz": 0.6015316445685305,
+                      "processed_peak_count": -0.13987655122868348,
+                      "collision_energy": -0.21770874495845488
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.516728624535316,
+                    "balanced_anchor_accuracy": 0.5228621952759884,
+                    "ties": 0,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                },
+                {
+                  "feature": 3317,
+                  "concept": "fg_hydroxyl",
+                  "test": {
+                    "positive": 372,
+                    "negative": 652,
+                    "auroc": 0.6351466125733888,
+                    "average_precision": 0.568115121969589,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.48081841432225064,
+                    "recall": 0.5053763440860215,
+                    "f1": 0.4927916120576671,
+                    "predicted_positive": 391
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": 0.06403994516921593,
+                      "precursor_mz": 0.06927910372388545,
+                      "processed_peak_count": 0.43505403960937505,
+                      "collision_energy": 0.06506664980116755
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 269,
+                    "unique_donors": 153,
+                    "positive_anchors": 87,
+                    "negative_anchors": 182,
+                    "accuracy": 0.5241635687732342,
+                    "balanced_anchor_accuracy": 0.5268567639257294,
+                    "ties": 170,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_halide": {
+              "selected_features": 1,
+              "mean_test_auroc": 0.6125332919034091,
+              "records": [
+                {
+                  "feature": 6996,
+                  "concept": "fg_halide",
+                  "test": {
+                    "positive": 320,
+                    "negative": 704,
+                    "auroc": 0.6125332919034091,
+                    "average_precision": 0.4132733302807129,
+                    "threshold": 0.0,
+                    "comparison_operator": ">",
+                    "precision": 0.41586538461538464,
+                    "recall": 0.540625,
+                    "f1": 0.4701086956521739,
+                    "predicted_positive": 416
+                  },
+                  "test_nuisance_profile": {
+                    "spearman": {
+                      "exact_mass": -0.05474503023758077,
+                      "precursor_mz": -0.05408140944585679,
+                      "processed_peak_count": 0.2892692299204855,
+                      "collision_energy": 0.11287542802385472
+                    }
+                  },
+                  "test_matched_donor_ordering": {
+                    "directed_pairs": 396,
+                    "unique_donors": 273,
+                    "positive_anchors": 167,
+                    "negative_anchors": 229,
+                    "accuracy": 0.5959595959595959,
+                    "balanced_anchor_accuracy": 0.5943179143895615,
+                    "ties": 160,
+                    "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+                  }
+                }
+              ]
+            },
+            "fg_nitrile": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            },
+            "fg_sulfonyl": {
+              "selected_features": 0,
+              "mean_test_auroc": null,
+              "records": []
+            }
+          }
+        }
+      }
+    },
+    "paired_comparison": {
+      "feature_models": {
+        "parent_1190k": {
+          "sae": {
+            "concepts": {
+              "fg_amide": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.5961079055425806,
+                  "ci95": [
+                    0.5790165025505913,
+                    0.6147940664915319
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_amine": {
+                "selected_features": 0,
+                "auroc": null
+              },
+              "fg_hydroxyl": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.6199297859357478,
+                  "ci95": [
+                    0.5905964318110641,
+                    0.6516141334706459
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_halide": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.6769941850142045,
+                  "ci95": [
+                    0.6476799148549369,
+                    0.7045758192698557
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_nitrile": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.52380037568306,
+                  "ci95": [
+                    0.472958812774921,
+                    0.5714372702621323
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_sulfonyl": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.6087351539251573,
+                  "ci95": [
+                    0.5732439361226795,
+                    0.6422279564353371
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              }
+            }
+          }
+        },
+        "periodic_1209k": {
+          "sae": {
+            "concepts": {
+              "fg_amide": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.5773887209781563,
+                  "ci95": [
+                    0.5534368720975923,
+                    0.6023085269764958
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_amine": {
+                "selected_features": 0,
+                "auroc": null
+              },
+              "fg_hydroxyl": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.5931841232930932,
+                  "ci95": [
+                    0.564041090417871,
+                    0.6234654565999692
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_halide": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.6537586558948864,
+                  "ci95": [
+                    0.6251448061008847,
+                    0.6839739677734952
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_nitrile": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.5134317366803278,
+                  "ci95": [
+                    0.456368266094939,
+                    0.5750114544308443
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_sulfonyl": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.63643904879783,
+                  "ci95": [
+                    0.6002227629583581,
+                    0.6712489869230954
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              }
+            }
+          }
+        },
+        "diffusion_831k": {
+          "sae": {
+            "concepts": {
+              "fg_amide": {
+                "selected_features": 0,
+                "auroc": null
+              },
+              "fg_amine": {
+                "selected_features": 0,
+                "auroc": null
+              },
+              "fg_hydroxyl": {
+                "selected_features": 2,
+                "auroc": {
+                  "estimate": 0.6897490764562306,
+                  "ci95": [
+                    0.6668146241377696,
+                    0.7101259825710703
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_halide": {
+                "selected_features": 1,
+                "auroc": {
+                  "estimate": 0.6125332919034091,
+                  "ci95": [
+                    0.5793944595176096,
+                    0.6484662724228887
+                  ],
+                  "valid_bootstrap_replicates": 1000,
+                  "undefined_bootstrap_replicates": 0,
+                  "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+                }
+              },
+              "fg_nitrile": {
+                "selected_features": 0,
+                "auroc": null
+              },
+              "fg_sulfonyl": {
+                "selected_features": 0,
+                "auroc": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "provenance": {
+    "created_at": "2026-09-30T04:57:47.667946+00:00",
+    "scope": "Read-only authenticated W&B and generation-pinned GCS provenance audit. No model inference or cloud writes in this audit.",
+    "endpoint": {
+      "arm": "diffusion_831k",
+      "run_id": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+      "run_url": "https://wandb.ai/iclac/jepa-finalrun/runs/adiff-1p8b-ep-v6e32-4d-20260922-080322",
+      "run_state": "finished",
+      "checkpoint_step": 831000,
+      "checkpoint_uri": "gs://metal-repeater-411410-spectra-checkpoints/skypilot/adiff-1p8b-ep-v6e32-4d-20260922-080322/checkpoints/orbax/831000",
+      "committed_at_utc": "2026-09-26T08:18:07.570999+00:00",
+      "objects": 60,
+      "bytes": 12170903135,
+      "pinned_inventory": "endpoint_selection.json",
+      "source_module": "encoder",
+      "selection": "Latest numeric retained checkpoint with positive commit timestamp and explicit commit markers; agrees with final W&B step."
+    },
+    "objective": {
+      "training_task": "pretrain",
+      "routing_training_mode": "mae",
+      "objective": "absorbing_diffusion",
+      "target": "2048-way exact cross-entropy for masked m/z bins, intensity conditioned",
+      "bin_width_da": 0.48828125,
+      "teacher_checkpoint": null,
+      "use_ema_teacher": false,
+      "frozen_teacher_update_every_steps": 0,
+      "chemistry_labels_used_in_encoder_objective": false,
+      "inference_readout": "Frozen clean-input native encoder tokens; diffusion predictor and categorical reconstruction head are not the molecular chemistry readout."
+    },
+    "initialization": {
+      "conclusion": "Evidence supports an initially fresh diffusion student, not initialization from parent1190k or periodic1209k.",
+      "first_logged_global_step": 0,
+      "first_logged_steps": [
+        0,
+        250,
+        500,
+        750,
+        1000
+      ],
+      "no_teacher_paths": true,
+      "launch_explicit_init_or_resume_argument": false,
+      "source_interpretation": "Current training code builds the model and resumes only when its workdir has an existing Orbax checkpoint; fresh pretrain initialization has no encoder checkpoint load. The uploaded train.py routes to this task; full historical module identity is not available.",
+      "limits": [
+        "Starting at zero does not exclude later restarts that resume within the same W&B run.",
+        "Configuration inheritance reuses architectural settings, not evidence of inherited weights."
+      ]
+    },
+    "training_exposure": {
+      "definition": "Nominal spectrum presentations = checkpoint global step \u00d7 configured global batch1024. Initial global-step zero is observed in each run. Accumulation8 is already included in global batch and is not multiplied again.",
+      "nominal_spectrum_presentations": {
+        "parent_1190k": 1218560000,
+        "periodic_1209k": 1238016000,
+        "diffusion_831k": 850944000
+      },
+      "first_logged_global_steps": {
+        "parent_1190k": 0,
+        "periodic_1209k": 0,
+        "diffusion_831k": 0
+      },
+      "diffusion_time_limit_hours": 95,
+      "diffusion_stopped_for_time_limit": true,
+      "diffusion_global_batch_recorded": 1024,
+      "limitations": [
+        "Not unique spectra or molecular counts; examples may repeat.",
+        "Does not prove identical example ordering, unbroken execution, or equal optimization compute.",
+        "Parent/periodic teacher training history is not added to student input presentations.",
+        "Periodic1209k is a fresh-student run beginning at0, not19k updates of parent1190k."
+      ]
+    },
+    "data_contract": {
+      "all_three_equal": true,
+      "contract": {
+        "format": "spectra_learning.massive_v2_ms2_shards.v1",
+        "manifest_sha256": "04761a9e16213562717bdd84f03f4d3daf46bf462ad187a0eb93c24a719e9319",
+        "repo_id": "novogaia/massive-v2-ms2-t095-l080-sharded-10gb",
+        "revision": "b098155fccb7335b752f2690bf16d2479d69bf5b",
+        "shard_plan_sha256": "bb787dcf7b6fe74bce7059c0ae9c7101c5cb5957ad8a9a4cbbb0d53a9930cc6a"
+      },
+      "comparison_artifacts": [
+        "parent_1190k_checkpoint_metadata.json",
+        "periodic_1209k_checkpoint_metadata.json"
+      ]
+    },
+    "input_confounds": {
+      "diffusion_mz_quantization": "Valid peak m/z is mapped to bin midpoint (floor(clipped_mz/width)+0.5)*width before Fourier embedding; width0.48828125 Da. Keep the native transformation for this endpoint.",
+      "baseline_mz_quantization": "Parent and periodic latent-JEPA configurations do not activate the absorbing-diffusion encoder quantizer.",
+      "other_known_differences": [
+        "Objective and teacher regime",
+        "Training steps/nominal presentations",
+        "Mask sampling and target definition",
+        "Single learned encoder per recipe; equal initial seed does not isolate training-recipe effect"
+      ],
+      "interpretation": "A measured endpoint comparison can rank these encoders under the shared panel/readout. It cannot attribute differences causally to the diffusion loss alone."
+    },
+    "config_integrity": {
+      "shared_fields": 225,
+      "different": {},
+      "checkpoint_only": [],
+      "wandb_only": [
+        "config_path",
+        "frozen_teacher_update_every_steps"
+      ]
+    },
+    "historical_source": {
+      "wandb_git_commit": null,
+      "uploaded_train_py": {
+        "path": "artifacts/encoder_chemistry_20260930/diffusion_extension/training_source/code/train.py",
+        "wandb_file": "code/train.py",
+        "wandb_md5": "CBQlLLHCDybOrfUtl9wSAA==",
+        "size": 2884,
+        "sha256": "c656af5e411000ef753c340bfd1ef8f7d9510e0ee545d77ff96cf0042b4b37e2",
+        "scope": "Exact W&B-uploaded train.py only; no complete historical model source or git commit available.",
+        "remote_md5_matches": true
+      },
+      "limitation": "Only train.py was archived by W&B; current local model/training sources are audited implementation evidence, not a cryptographically complete historical training snapshot."
+    },
+    "current_reference_source_sha256": {
+      "configs/1p8b_absorbing_diffusion.py": "9facabbcb76db3dcb1b0d6ff022b8daccd3ffd6dfb5f664e85dadc39205484d8",
+      "spectra_learning/models/model_jax.py": "8f384833d1b89cbbc9f1308ef9de3e4fae1c4804737cb9a86a7d957c80a1a790",
+      "spectra_learning/models/encoder_jax.py": "3ca16a5d5d24f7a00024ec75204e471acb0d43bb899787a345a8ba1ff39336dc",
+      "spectra_learning/training/pretrain_jax.py": "fc57e82f38f9a3ef99f0cac16625be0274d5b70c08cf0f56e505641ae207aecf"
+    },
+    "evidence_files": {
+      "config.json": {
+        "sha256": "d651a4d6dbf27bab323db5d6e9b911d7b0d50711624d856c47468d13f445fcf9",
+        "size_bytes": 9147
+      },
+      "run.json": {
+        "sha256": "ae12e2a3cc9aa605b73c55e246bada785ad347a2bab7f233613ff192cb194eff",
+        "size_bytes": 15080
+      },
+      "endpoint_selection.json": {
+        "sha256": "1139c305b37c7e889f21529c8cf891b7c153cdb4e6e6d93303e5c1e5b038e1f8",
+        "size_bytes": 11332
+      },
+      "checkpoint_metadata.json": {
+        "sha256": "649b6b223d49fe0be6608a2c939c9d079e84f20068e261a57405b4664d9d6ffb",
+        "size_bytes": 10675
+      },
+      "config_comparison.json": {
+        "sha256": "a1fe4acf3bc156d3589b9a748de28425c6e7d7b8c0bbbc4b9380bcaf25b78948",
+        "size_bytes": 153
+      },
+      "first_history.json": {
+        "sha256": "6510470a0c27e863b4000289792d7c62e9fc37d03a5a18e88def879abf8a61d4",
+        "size_bytes": 441
+      },
+      "launch_metadata.json": {
+        "sha256": "2d124662c97505943ddd816fe275c0ff5411c4c0d9a69e2974d5604215a03db3",
+        "size_bytes": 9402
+      },
+      "gcs_run_config.json": {
+        "sha256": "1ed90d55469f10dc11c74f6dce97ba4751bdd37cedb5c5a65347d9491a459466",
+        "size_bytes": 9207
+      },
+      "final_metrics.json": {
+        "sha256": "b2e17506299056d5cc9c78bd87e8e698948106386616767999afae90cc364672",
+        "size_bytes": 4674
+      },
+      "training_source.json": {
+        "sha256": "9e08034ccbe120dc2c2d5180c9c291fcf6c60aed8c769a2279d794ad31235348",
+        "size_bytes": 414
+      },
+      "training_source/code/train.py": {
+        "sha256": "c656af5e411000ef753c340bfd1ef8f7d9510e0ee545d77ff96cf0042b4b37e2",
+        "size_bytes": 2884
+      },
+      "checkpoint_structure/state/_METADATA": {
+        "sha256": "377f2867874608f647d1d39622f50d4bb4596cb0f4533401b22614a0a483b60c",
+        "size_bytes": 477197
+      },
+      "checkpoint_structure/state/array_metadatas/process_0": {
+        "sha256": "acc562ce1fb0f5e6545ae5afa22e6cef9224df3ea2e10599246c0d014e41044b",
+        "size_bytes": 177466
+      },
+      "parent_1190k_checkpoint_metadata.json": {
+        "sha256": "f3f2c451203a59312c2552058ebba464c3b5d8a97c5c56cd3b4f23d10f3dca4e",
+        "size_bytes": 8851
+      },
+      "parent_1190k_checkpoint_metadata_object.json": {
+        "sha256": "ca53169ae07227c0e2768f543e1284ff4933aff86a01b4c764d8b14974894465",
+        "size_bytes": 329
+      },
+      "parent_1190k_run_lineage.json": {
+        "sha256": "3c9ce83af35a3909ab6b5752e16fced0249d89790ddd65cba5564e108215f8ba",
+        "size_bytes": 747
+      },
+      "periodic_1209k_checkpoint_metadata.json": {
+        "sha256": "89531d27269c7059ea70658159a5c231fcdb991ddf95c4422956827dd0bbb2b2",
+        "size_bytes": 8927
+      },
+      "periodic_1209k_checkpoint_metadata_object.json": {
+        "sha256": "06ea670b7eb3ebd75046a4c197e3a9eaa94ac00bb5295f5882db50f0ac6157ac",
+        "size_bytes": 321
+      },
+      "periodic_1209k_run_lineage.json": {
+        "sha256": "ceee52e83d7281d5f82ebf488f50ba99b2f88b7c37bb0084f53386ef1e98e4cc",
+        "size_bytes": 737
+      }
+    }
+  },
+  "pilot": {
+    "name": "diffusion_831k",
+    "checkpoint": "/results/encoder_chemistry_20260930/checkpoints/diffusion_831000",
+    "config": {
+      "b1": 0.9,
+      "b2": 0.95,
+      "seed": 66,
+      "device": "auto",
+      "norm_eps": 1e-05,
+      "model_dim": 2048,
+      "num_peaks": 127,
+      "optimizer": "adam",
+      "batch_size": 1024,
+      "num_epochs": 98,
+      "config_path": "configs/1p8b_absorbing_diffusion.py",
+      "mae_mz_head": "readout",
+      "artifact_dir": "data/massive_v2_ms2_t095_l080_sharded_10gb",
+      "compile_mode": "max-autotune-no-cudagraphs",
+      "enable_wandb": true,
+      "wandb_kwargs": {
+        "id": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+        "name": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+        "tags": [
+          "skypilot",
+          "gcp",
+          "dws",
+          "flex-start",
+          "tpu-v6e",
+          "1p8b_absorbing_diffusion"
+        ],
+        "notes": "SkyPilot GCP DWS TPU v6e run launched by train_sky.py.",
+        "resume": "allow"
+      },
+      "warmup_steps": 10000,
+      "weight_decay": 0,
+      "learning_rate": 0.0003,
+      "mae_objective": "absorbing_diffusion",
+      "peak_ordering": "mz",
+      "predictor_dim": 2048,
+      "training_mode": "mae",
+      "training_task": "pretrain",
+      "val_num_steps": 50,
+      "wandb_project": "jepa-finalrun",
+      "autocast_dtype": "bf16",
+      "device_backend": "jax",
+      "drop_remainder": true,
+      "grad_clip_norm": 1,
+      "jax_zero1_mode": "per_leaf",
+      "shuffle_buffer": 1000000,
+      "jax_profile_dir": "",
+      "mae_loss_weight": 1,
+      "optimizer_fused": true,
+      "run_name_suffix": "jax-absorbing-mz-diffusion-1p8b-d2048-l25-pred5-h8-n128-cls-k-uniform-exactce-mzbins2048-readout-intensity-conditioned-bs1024-ga8-adam-bf16state-zero1-perleaf-lr3e-4-2m",
+      "use_ema_teacher": false,
+      "wandb_resume_id": "",
+      "jax_log_compiles": false,
+      "jax_mesh_devices": "32",
+      "mae_mz_objective": "exact_ce",
+      "max_precursor_mz": 1000,
+      "encoder_num_heads": 8,
+      "gems_hdf5_repo_id": "novogaia/massive-v2-ms2-t095-l080-sharded-10gb",
+      "jax_profile_steps": 0,
+      "jepa_mask_lengths": [
+        2,
+        4,
+        8,
+        12
+      ],
+      "log_every_n_steps": 250,
+      "min_learning_rate": 3e-06,
+      "pairmixer_dropout": 0,
+      "predictor_dropout": 0,
+      "val_every_n_steps": 10000,
+      "wandb_shared_mode": false,
+      "distogram_pair_dim": null,
+      "encoder_num_layers": 25,
+      "gems_hdf5_manifest": "manifest.json",
+      "gems_hdf5_revision": "b098155fccb7335b752f2690bf16d2479d69bf5b",
+      "jepa_block_min_len": 1,
+      "jepa_mask_strategy": [
+        "random"
+      ],
+      "masked_mz_sentinel": -1,
+      "max_duration_hours": 95,
+      "min_peak_intensity": 0.0001,
+      "msg_probe_variants": [
+        "single_pair_covariance"
+      ],
+      "pairmixer_pair_dim": 640,
+      "training_max_steps": 2000000,
+      "wandb_shared_label": "train",
+      "jax_timing_barriers": false,
+      "jax_zero1_optimizer": true,
+      "ema_teacher_schedule": "cosine",
+      "encoder_mz_embedding": "fourier",
+      "jax_log_update_stats": false,
+      "jepa_mae_loss_weight": 0,
+      "jepa_mae_mz_bin_size": 0.48828125,
+      "jepa_mask_round_from": 3,
+      "jepa_target_fraction": 0.25,
+      "msg_probe_batch_size": 512,
+      "msg_probe_num_epochs": 100,
+      "pairmixer_block_type": "fastmixer-dense",
+      "target_projector_dim": -1,
+      "wandb_shared_primary": true,
+      "dataloader_pin_memory": false,
+      "distogram_loss_weight": 0,
+      "encoder_fourier_x_max": 1000,
+      "encoder_fourier_x_min": 0.003,
+      "encoder_use_cls_token": true,
+      "jepa_context_fraction": 0.6,
+      "msg_probe_fingerprint": "maccs",
+      "msg_probe_num_repeats": null,
+      "optimizer_state_dtype": "bf16",
+      "wandb_resume_from_env": false,
+      "attention_mlp_multiple": 2.6666666666666665,
+      "checkpoint_every_steps": 500,
+      "contrastive_batch_size": 128,
+      "covariance_pooling_dim": 64,
+      "dataloader_num_workers": 4,
+      "feature_mlp_hidden_dim": 4096,
+      "gems_hdf5_shuffle_seed": 67,
+      "jax_profile_start_step": 10000,
+      "jepa_mae_intensity_max": 1,
+      "jepa_num_target_blocks": 1,
+      "msg_probe_warmup_steps": 0,
+      "msg_probe_weight_decay": 0,
+      "pairmixer_mz_embedding": "fourier",
+      "predictor_mlp_multiple": 2.6666666666666665,
+      "contrastive_loss_weight": 0,
+      "contrastive_temperature": 0.1,
+      "encoder_metadata_schema": "massive_v2_acquisition_v1",
+      "latent_pair_loss_weight": 0,
+      "mae_gap_bucket_edges_da": [
+        2,
+        5
+      ],
+      "masked_token_input_mode": "latent_token",
+      "msg_probe_at_final_step": false,
+      "msg_probe_every_n_steps": -1,
+      "msg_probe_learning_rate": 0.0003,
+      "msg_probe_pma_num_heads": 8,
+      "msg_probe_pma_num_seeds": 32,
+      "msg_probe_select_metric": "msg_probe/val/auc_fluorine",
+      "msg_probe_warmup_epochs": 0.5,
+      "pairmixer_fourier_x_min": 0.01,
+      "pairmixer_use_pair_bias": true,
+      "peak_drop_min_intensity": 0.0001,
+      "throughput_warmup_steps": 25,
+      "contrastive_compile_mode": "none",
+      "dataloader_output_format": "numpy",
+      "ema_teacher_momentum_mid": null,
+      "encoder_apply_final_norm": true,
+      "gems_hdf5_rows_per_block": 0,
+      "input_randomness_version": 2,
+      "jax_explain_cache_misses": false,
+      "jepa_intensity_aware_tau": 0.5,
+      "jepa_mask_schedule_steps": [],
+      "mae_mz_multiscale_weight": 0,
+      "mae_mz_multiscale_widths": [],
+      "masked_token_loss_weight": 0,
+      "msg_probe_early_stopping": true,
+      "msg_probe_grad_clip_norm": 1,
+      "msg_probe_mlp_hidden_dim": 256,
+      "online_probe_loss_weight": 0,
+      "encoder_fourier_num_freqs": 64,
+      "encoder_mz_token_bin_size": 0.02,
+      "jax_compilation_cache_dir": "/tmp/spectra-jax-cache/1p8b_absorbing_diffusion_v6e4x8_b1024_accum8",
+      "jepa_allow_target_overlap": false,
+      "jepa_target_normalization": "none",
+      "mae_intensity_loss_weight": 0,
+      "pairmixer_transition_type": "swiglu",
+      "training_flops_per_sample": null,
+      "activation_checkpoint_mode": "full",
+      "contrastive_covariance_dim": 64,
+      "dataloader_prefetch_factor": 2,
+      "ema_teacher_momentum_final": 0.99925,
+      "ema_teacher_momentum_start": 0.996,
+      "frozen_teacher_config_path": null,
+      "gems_hdf5_ms_level_dataset": "MS level",
+      "gems_hdf5_spectrum_dataset": "spectrum",
+      "jax_checkpoint_max_to_keep": 5,
+      "jax_distributed_initialize": true,
+      "jax_training_deadline_path": "gs://metal-repeater-411410-spectra-checkpoints/skypilot/adiff-1p8b-ep-v6e32-4d-20260922-080322/training_deadline.txt",
+      "jepa_intensity_aware_alpha": 0.75,
+      "predictor_apply_final_norm": true,
+      "contrastive_pairs_per_epoch": 30000,
+      "distogram_multiscale_weight": 0,
+      "distogram_multiscale_widths": [],
+      "gems_hdf5_precursor_dataset": "precursor_mz",
+      "gradient_accumulation_steps": 8,
+      "jepa_mae_intensity_bin_size": 0.1,
+      "pairmixer_fourier_num_freqs": 16,
+      "pairmixer_mz_token_bin_size": 0.1,
+      "jax_enable_compilation_cache": true,
+      "training_flops_per_parameter": 6,
+      "activation_checkpoint_modules": [
+        "encoder",
+        "predictor"
+      ],
+      "contrastive_val_every_n_steps": 1000,
+      "dataloader_persistent_workers": false,
+      "encoder_apply_final_pair_norm": true,
+      "encoder_metadata_conditioning": "adaln_zero",
+      "jepa_gap_aware_bucket_weights": [
+        0.2,
+        0.4,
+        0.4
+      ],
+      "jepa_target_fraction_schedule": [
+        0.25
+      ],
+      "nist_murcko_probe_num_repeats": 1,
+      "collapse_metrics_every_n_steps": 0,
+      "encoder_fourier_mlp_hidden_dim": 4096,
+      "encoder_fourier_mlp_num_layers": 4,
+      "encoder_metadata_condition_dim": 256,
+      "encoder_mz_token_embedding_dim": 77,
+      "encoder_use_position_embedding": true,
+      "frozen_teacher_checkpoint_path": null,
+      "jax_enable_async_checkpointing": true,
+      "jepa_context_fraction_schedule": [
+        0.6
+      ],
+      "jepa_gap_aware_bucket_edges_da": [
+        2,
+        5
+      ],
+      "contrastive_val_pairs_per_epoch": 10000,
+      "jepa_intensity_aware_eps_target": 0.08,
+      "gems_hdf5_retention_time_dataset": "RT",
+      "jepa_intensity_aware_anchor_keep": 0.6,
+      "jepa_intensity_aware_beta_target": 0.85,
+      "jepa_intensity_aware_eps_context": 0.04,
+      "latent_pair_target_normalization": "none",
+      "pairmixer_mz_token_embedding_dim": 128,
+      "pairmixer_relative_fourier_x_max": 1,
+      "pairmixer_relative_fourier_x_min": 0.001,
+      "wandb_shared_update_finish_state": false,
+      "contrastive_triplet_hard_fraction": null,
+      "frozen_teacher_update_every_steps": 0,
+      "jepa_intensity_aware_beta_context": 0.85,
+      "jepa_intensity_aware_local_gap_da": 1,
+      "masked_latent_predictor_num_heads": 8,
+      "msg_probe_early_stopping_patience": 5,
+      "pairmixer_pair_feature_hidden_dim": 1280,
+      "training_flops_per_optimizer_step": null,
+      "dataloader_multiprocessing_context": "spawn",
+      "ema_teacher_schedule_peak_fraction": 0.35,
+      "masked_latent_predictor_num_layers": 5,
+      "msg_probe_early_stopping_min_delta": 0.0001,
+      "precursor_peak_exclusion_window_da": 0,
+      "contrastive_online_probe_hidden_dim": 1024,
+      "jax_compile_stall_threshold_seconds": 0,
+      "jepa_intensity_aware_min_eff_target": 1.8,
+      "msg_probe_early_stopping_min_epochs": 20,
+      "activation_checkpoint_every_n_layers": 1,
+      "gradient_accumulation_steps_schedule": [
+        8
+      ],
+      "jepa_intensity_aware_min_eff_context": 4,
+      "jepa_intensity_aware_min_unused_mass": 0.09,
+      "jepa_intensity_aware_tail_target_mix": 0.1,
+      "spectrum_metadata_dropout_probability": 0.1,
+      "msg_probe_pairwise_alignment_num_pairs": 0,
+      "activation_checkpoint_preserve_rng_state": true,
+      "contrastive_single_pair_include_diagonal": false,
+      "jax_persistent_cache_min_entry_size_bytes": 0,
+      "jax_persistent_cache_min_compile_time_secs": 0,
+      "jepa_intensity_aware_local_gap_probability": 0.5,
+      "resolved_pairmixer_fast_max_visible_tokens": 128,
+      "resolved_pairmixer_fast_encoder_max_visible_tokens": 127
+    },
+    "inputs_sha256": "b961f0ac838fcc4b89592422d360667f58efe6fc40fa0126859292f51d1d05f0",
+    "source_sha256": {
+      "scripts/modal_encoder_chemistry.py": "27036ef0335227fe6dc493705833904edb2319e1329d79934edd493bddf24727",
+      "scripts/encoder_chemistry_interventions.py": "c4df2dcef8472030f2404b7198e4e5d826374971bbe8af968823ebdde1e929ac",
+      "spectra_learning/models/encoder_jax.py": "3ca16a5d5d24f7a00024ec75204e471acb0d43bb899787a345a8ba1ff39336dc",
+      "spectra_learning/models/pairmixer_jax.py": "67ffe647ddb2141d09f4e0f4e037ac5ae16a56bf43209c288124eb5b81bc6209",
+      "spectra_learning/models/common_jax.py": "032f4d58e2c33527d54a72a57868ab94775a495c4a632b796a68e67d575fd01e",
+      "spectra_learning/training/checkpointing_jax.py": "874ca7ef3e9904af3310d68a53e7019ee1007e600612c893d07df7fd6dd1db2b"
+    },
+    "versions": {
+      "jax": "0.11.0",
+      "jaxlib": "0.11.0",
+      "flax": "0.12.8",
+      "optax": "0.2.8",
+      "orbax-checkpoint": "0.12.4",
+      "numpy": "2.5.2",
+      "torch": "2.13.0"
+    },
+    "rows": [
+      4096,
+      4097,
+      4098,
+      4099,
+      4100,
+      4101,
+      4102,
+      4103
+    ],
+    "device": "cuda:0",
+    "native_vs_instrumented": {
+      "relative_l2": 0.0,
+      "max_absolute": 0.0,
+      "rms": 0.0,
+      "median_token_cosine": 1.0,
+      "minimum_token_cosine": 0.9999998807907104,
+      "bitwise_equal": true,
+      "finite": true
+    },
+    "tolerance_relative_l2": 0.01,
+    "tolerance_rationale": "Numerical gate only, not evidence of causal effect. All effects must also exceed measured sham-patch noise.",
+    "identity_patches": [
+      {
+        "depth": 0,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 1,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 2,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 3,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 4,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 5,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 6,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 7,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 8,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 9,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 10,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 11,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 12,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 13,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 14,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 15,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 16,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 17,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 18,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 19,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 20,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 21,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 22,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 23,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 24,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      },
+      {
+        "depth": 25,
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "rms": 0.0,
+        "median_token_cosine": 1.0,
+        "minimum_token_cosine": 0.9999998807907104,
+        "bitwise_equal": true,
+        "finite": true
+      }
+    ],
+    "max_sham_relative_l2": 0.0,
+    "native_parity_passed": true,
+    "passed": true,
+    "complete": true,
+    "seconds": 64.22823548299999
+  },
+  "extraction": {
+    "name": "diffusion_831k",
+    "checkpoint": "/results/encoder_chemistry_20260930/checkpoints/diffusion_831000",
+    "config": {
+      "b1": 0.9,
+      "b2": 0.95,
+      "seed": 66,
+      "device": "auto",
+      "norm_eps": 1e-05,
+      "model_dim": 2048,
+      "num_peaks": 127,
+      "optimizer": "adam",
+      "batch_size": 1024,
+      "num_epochs": 98,
+      "config_path": "configs/1p8b_absorbing_diffusion.py",
+      "mae_mz_head": "readout",
+      "artifact_dir": "data/massive_v2_ms2_t095_l080_sharded_10gb",
+      "compile_mode": "max-autotune-no-cudagraphs",
+      "enable_wandb": true,
+      "wandb_kwargs": {
+        "id": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+        "name": "adiff-1p8b-ep-v6e32-4d-20260922-080322",
+        "tags": [
+          "skypilot",
+          "gcp",
+          "dws",
+          "flex-start",
+          "tpu-v6e",
+          "1p8b_absorbing_diffusion"
+        ],
+        "notes": "SkyPilot GCP DWS TPU v6e run launched by train_sky.py.",
+        "resume": "allow"
+      },
+      "warmup_steps": 10000,
+      "weight_decay": 0,
+      "learning_rate": 0.0003,
+      "mae_objective": "absorbing_diffusion",
+      "peak_ordering": "mz",
+      "predictor_dim": 2048,
+      "training_mode": "mae",
+      "training_task": "pretrain",
+      "val_num_steps": 50,
+      "wandb_project": "jepa-finalrun",
+      "autocast_dtype": "bf16",
+      "device_backend": "jax",
+      "drop_remainder": true,
+      "grad_clip_norm": 1,
+      "jax_zero1_mode": "per_leaf",
+      "shuffle_buffer": 1000000,
+      "jax_profile_dir": "",
+      "mae_loss_weight": 1,
+      "optimizer_fused": true,
+      "run_name_suffix": "jax-absorbing-mz-diffusion-1p8b-d2048-l25-pred5-h8-n128-cls-k-uniform-exactce-mzbins2048-readout-intensity-conditioned-bs1024-ga8-adam-bf16state-zero1-perleaf-lr3e-4-2m",
+      "use_ema_teacher": false,
+      "wandb_resume_id": "",
+      "jax_log_compiles": false,
+      "jax_mesh_devices": "32",
+      "mae_mz_objective": "exact_ce",
+      "max_precursor_mz": 1000,
+      "encoder_num_heads": 8,
+      "gems_hdf5_repo_id": "novogaia/massive-v2-ms2-t095-l080-sharded-10gb",
+      "jax_profile_steps": 0,
+      "jepa_mask_lengths": [
+        2,
+        4,
+        8,
+        12
+      ],
+      "log_every_n_steps": 250,
+      "min_learning_rate": 3e-06,
+      "pairmixer_dropout": 0,
+      "predictor_dropout": 0,
+      "val_every_n_steps": 10000,
+      "wandb_shared_mode": false,
+      "distogram_pair_dim": null,
+      "encoder_num_layers": 25,
+      "gems_hdf5_manifest": "manifest.json",
+      "gems_hdf5_revision": "b098155fccb7335b752f2690bf16d2479d69bf5b",
+      "jepa_block_min_len": 1,
+      "jepa_mask_strategy": [
+        "random"
+      ],
+      "masked_mz_sentinel": -1,
+      "max_duration_hours": 95,
+      "min_peak_intensity": 0.0001,
+      "msg_probe_variants": [
+        "single_pair_covariance"
+      ],
+      "pairmixer_pair_dim": 640,
+      "training_max_steps": 2000000,
+      "wandb_shared_label": "train",
+      "jax_timing_barriers": false,
+      "jax_zero1_optimizer": true,
+      "ema_teacher_schedule": "cosine",
+      "encoder_mz_embedding": "fourier",
+      "jax_log_update_stats": false,
+      "jepa_mae_loss_weight": 0,
+      "jepa_mae_mz_bin_size": 0.48828125,
+      "jepa_mask_round_from": 3,
+      "jepa_target_fraction": 0.25,
+      "msg_probe_batch_size": 512,
+      "msg_probe_num_epochs": 100,
+      "pairmixer_block_type": "fastmixer-dense",
+      "target_projector_dim": -1,
+      "wandb_shared_primary": true,
+      "dataloader_pin_memory": false,
+      "distogram_loss_weight": 0,
+      "encoder_fourier_x_max": 1000,
+      "encoder_fourier_x_min": 0.003,
+      "encoder_use_cls_token": true,
+      "jepa_context_fraction": 0.6,
+      "msg_probe_fingerprint": "maccs",
+      "msg_probe_num_repeats": null,
+      "optimizer_state_dtype": "bf16",
+      "wandb_resume_from_env": false,
+      "attention_mlp_multiple": 2.6666666666666665,
+      "checkpoint_every_steps": 500,
+      "contrastive_batch_size": 128,
+      "covariance_pooling_dim": 64,
+      "dataloader_num_workers": 4,
+      "feature_mlp_hidden_dim": 4096,
+      "gems_hdf5_shuffle_seed": 67,
+      "jax_profile_start_step": 10000,
+      "jepa_mae_intensity_max": 1,
+      "jepa_num_target_blocks": 1,
+      "msg_probe_warmup_steps": 0,
+      "msg_probe_weight_decay": 0,
+      "pairmixer_mz_embedding": "fourier",
+      "predictor_mlp_multiple": 2.6666666666666665,
+      "contrastive_loss_weight": 0,
+      "contrastive_temperature": 0.1,
+      "encoder_metadata_schema": "massive_v2_acquisition_v1",
+      "latent_pair_loss_weight": 0,
+      "mae_gap_bucket_edges_da": [
+        2,
+        5
+      ],
+      "masked_token_input_mode": "latent_token",
+      "msg_probe_at_final_step": false,
+      "msg_probe_every_n_steps": -1,
+      "msg_probe_learning_rate": 0.0003,
+      "msg_probe_pma_num_heads": 8,
+      "msg_probe_pma_num_seeds": 32,
+      "msg_probe_select_metric": "msg_probe/val/auc_fluorine",
+      "msg_probe_warmup_epochs": 0.5,
+      "pairmixer_fourier_x_min": 0.01,
+      "pairmixer_use_pair_bias": true,
+      "peak_drop_min_intensity": 0.0001,
+      "throughput_warmup_steps": 25,
+      "contrastive_compile_mode": "none",
+      "dataloader_output_format": "numpy",
+      "ema_teacher_momentum_mid": null,
+      "encoder_apply_final_norm": true,
+      "gems_hdf5_rows_per_block": 0,
+      "input_randomness_version": 2,
+      "jax_explain_cache_misses": false,
+      "jepa_intensity_aware_tau": 0.5,
+      "jepa_mask_schedule_steps": [],
+      "mae_mz_multiscale_weight": 0,
+      "mae_mz_multiscale_widths": [],
+      "masked_token_loss_weight": 0,
+      "msg_probe_early_stopping": true,
+      "msg_probe_grad_clip_norm": 1,
+      "msg_probe_mlp_hidden_dim": 256,
+      "online_probe_loss_weight": 0,
+      "encoder_fourier_num_freqs": 64,
+      "encoder_mz_token_bin_size": 0.02,
+      "jax_compilation_cache_dir": "/tmp/spectra-jax-cache/1p8b_absorbing_diffusion_v6e4x8_b1024_accum8",
+      "jepa_allow_target_overlap": false,
+      "jepa_target_normalization": "none",
+      "mae_intensity_loss_weight": 0,
+      "pairmixer_transition_type": "swiglu",
+      "training_flops_per_sample": null,
+      "activation_checkpoint_mode": "full",
+      "contrastive_covariance_dim": 64,
+      "dataloader_prefetch_factor": 2,
+      "ema_teacher_momentum_final": 0.99925,
+      "ema_teacher_momentum_start": 0.996,
+      "frozen_teacher_config_path": null,
+      "gems_hdf5_ms_level_dataset": "MS level",
+      "gems_hdf5_spectrum_dataset": "spectrum",
+      "jax_checkpoint_max_to_keep": 5,
+      "jax_distributed_initialize": true,
+      "jax_training_deadline_path": "gs://metal-repeater-411410-spectra-checkpoints/skypilot/adiff-1p8b-ep-v6e32-4d-20260922-080322/training_deadline.txt",
+      "jepa_intensity_aware_alpha": 0.75,
+      "predictor_apply_final_norm": true,
+      "contrastive_pairs_per_epoch": 30000,
+      "distogram_multiscale_weight": 0,
+      "distogram_multiscale_widths": [],
+      "gems_hdf5_precursor_dataset": "precursor_mz",
+      "gradient_accumulation_steps": 8,
+      "jepa_mae_intensity_bin_size": 0.1,
+      "pairmixer_fourier_num_freqs": 16,
+      "pairmixer_mz_token_bin_size": 0.1,
+      "jax_enable_compilation_cache": true,
+      "training_flops_per_parameter": 6,
+      "activation_checkpoint_modules": [
+        "encoder",
+        "predictor"
+      ],
+      "contrastive_val_every_n_steps": 1000,
+      "dataloader_persistent_workers": false,
+      "encoder_apply_final_pair_norm": true,
+      "encoder_metadata_conditioning": "adaln_zero",
+      "jepa_gap_aware_bucket_weights": [
+        0.2,
+        0.4,
+        0.4
+      ],
+      "jepa_target_fraction_schedule": [
+        0.25
+      ],
+      "nist_murcko_probe_num_repeats": 1,
+      "collapse_metrics_every_n_steps": 0,
+      "encoder_fourier_mlp_hidden_dim": 4096,
+      "encoder_fourier_mlp_num_layers": 4,
+      "encoder_metadata_condition_dim": 256,
+      "encoder_mz_token_embedding_dim": 77,
+      "encoder_use_position_embedding": true,
+      "frozen_teacher_checkpoint_path": null,
+      "jax_enable_async_checkpointing": true,
+      "jepa_context_fraction_schedule": [
+        0.6
+      ],
+      "jepa_gap_aware_bucket_edges_da": [
+        2,
+        5
+      ],
+      "contrastive_val_pairs_per_epoch": 10000,
+      "jepa_intensity_aware_eps_target": 0.08,
+      "gems_hdf5_retention_time_dataset": "RT",
+      "jepa_intensity_aware_anchor_keep": 0.6,
+      "jepa_intensity_aware_beta_target": 0.85,
+      "jepa_intensity_aware_eps_context": 0.04,
+      "latent_pair_target_normalization": "none",
+      "pairmixer_mz_token_embedding_dim": 128,
+      "pairmixer_relative_fourier_x_max": 1,
+      "pairmixer_relative_fourier_x_min": 0.001,
+      "wandb_shared_update_finish_state": false,
+      "contrastive_triplet_hard_fraction": null,
+      "frozen_teacher_update_every_steps": 0,
+      "jepa_intensity_aware_beta_context": 0.85,
+      "jepa_intensity_aware_local_gap_da": 1,
+      "masked_latent_predictor_num_heads": 8,
+      "msg_probe_early_stopping_patience": 5,
+      "pairmixer_pair_feature_hidden_dim": 1280,
+      "training_flops_per_optimizer_step": null,
+      "dataloader_multiprocessing_context": "spawn",
+      "ema_teacher_schedule_peak_fraction": 0.35,
+      "masked_latent_predictor_num_layers": 5,
+      "msg_probe_early_stopping_min_delta": 0.0001,
+      "precursor_peak_exclusion_window_da": 0,
+      "contrastive_online_probe_hidden_dim": 1024,
+      "jax_compile_stall_threshold_seconds": 0,
+      "jepa_intensity_aware_min_eff_target": 1.8,
+      "msg_probe_early_stopping_min_epochs": 20,
+      "activation_checkpoint_every_n_layers": 1,
+      "gradient_accumulation_steps_schedule": [
+        8
+      ],
+      "jepa_intensity_aware_min_eff_context": 4,
+      "jepa_intensity_aware_min_unused_mass": 0.09,
+      "jepa_intensity_aware_tail_target_mix": 0.1,
+      "spectrum_metadata_dropout_probability": 0.1,
+      "msg_probe_pairwise_alignment_num_pairs": 0,
+      "activation_checkpoint_preserve_rng_state": true,
+      "contrastive_single_pair_include_diagonal": false,
+      "jax_persistent_cache_min_entry_size_bytes": 0,
+      "jax_persistent_cache_min_compile_time_secs": 0,
+      "jepa_intensity_aware_local_gap_probability": 0.5,
+      "resolved_pairmixer_fast_max_visible_tokens": 128,
+      "resolved_pairmixer_fast_encoder_max_visible_tokens": 127
+    },
+    "inputs_sha256": "b961f0ac838fcc4b89592422d360667f58efe6fc40fa0126859292f51d1d05f0",
+    "source_sha256": {
+      "scripts/modal_encoder_chemistry.py": "27036ef0335227fe6dc493705833904edb2319e1329d79934edd493bddf24727",
+      "scripts/encoder_chemistry_interventions.py": "c4df2dcef8472030f2404b7198e4e5d826374971bbe8af968823ebdde1e929ac",
+      "spectra_learning/models/encoder_jax.py": "3ca16a5d5d24f7a00024ec75204e471acb0d43bb899787a345a8ba1ff39336dc",
+      "spectra_learning/models/pairmixer_jax.py": "67ffe647ddb2141d09f4e0f4e037ac5ae16a56bf43209c288124eb5b81bc6209",
+      "spectra_learning/models/common_jax.py": "032f4d58e2c33527d54a72a57868ab94775a495c4a632b796a68e67d575fd01e",
+      "spectra_learning/training/checkpointing_jax.py": "874ca7ef3e9904af3310d68a53e7019ee1007e600612c893d07df7fd6dd1db2b"
+    },
+    "versions": {
+      "jax": "0.11.0",
+      "jaxlib": "0.11.0",
+      "flax": "0.12.8",
+      "optax": "0.2.8",
+      "orbax-checkpoint": "0.12.4",
+      "numpy": "2.5.2",
+      "torch": "2.13.0"
+    },
+    "complete": true,
+    "rows": 6144,
+    "token_depths": [
+      19,
+      27
+    ],
+    "state_depths": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      "final_norm",
+      "final"
+    ],
+    "bf16_storage": "uint16 bit patterns, lossless; view with ml_dtypes.bfloat16",
+    "shapes": {
+      "mean": [
+        28,
+        6144,
+        2048
+      ],
+      "max": [
+        28,
+        6144,
+        2048
+      ],
+      "cls": [
+        28,
+        6144,
+        2048
+      ],
+      "tokens_bf16": [
+        2,
+        6144,
+        128,
+        2048
+      ],
+      "attention_rms": [
+        25,
+        6144
+      ],
+      "mlp_rms": [
+        25,
+        6144
+      ]
+    },
+    "seconds": 92.38938959000001,
+    "extraction_vs_native_pilot": {
+      "relative_l2": 0.0,
+      "max_absolute": 0.0,
+      "rms": 0.0,
+      "median_token_cosine": 1.0,
+      "minimum_token_cosine": 0.9999998807907104,
+      "bitwise_equal": true,
+      "finite": true
+    },
+    "trace_mode": "full dynamic trace graph, batch8, separately compiled summaries; exact pilot parity",
+    "files": {
+      "mean": {
+        "bytes": 1409286272,
+        "sha256": "4b063f09040316064134134426562f0bcaf21731d1f6c69d5b8a3db7e160a23b"
+      },
+      "max": {
+        "bytes": 1409286272,
+        "sha256": "670edc1c476dc96dbb7ced2319f8d72caa29c6a589c26c56d279a55b26ca0bdb"
+      },
+      "cls": {
+        "bytes": 1409286272,
+        "sha256": "ba5e74a6ee8544a7c78865466fdb0f09415b9fd00fc961ad32087325c6aa65c8"
+      },
+      "tokens_bf16": {
+        "bytes": 6442451072,
+        "sha256": "5d195e6d9b0365bbc361bed7431484c6f5f5282f1d4272e3352c765486114e3c"
+      },
+      "attention_rms": {
+        "bytes": 614528,
+        "sha256": "91c14913dab0369ac0479e832fc6c18a521684f4bbbeeee8497026588333e98b"
+      },
+      "mlp_rms": {
+        "bytes": 614528,
+        "sha256": "d865fcd813180ed9c8db754385339d09be301639a2d6a0838f8951a6cb551af5"
+      }
+    }
+  },
+  "source_files": {
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/readout_comparison.json": {
+      "sha256": "d8030f2fb9677c0bbc2c233e4e12ea034caf4b90074818b6740ef56dcc4cdede",
+      "size_bytes": 2414569
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_comparison.json": {
+      "sha256": "fe900624bf13d50ab87414392dd8d2b29770b4e1e6e5d198acac7277630c9dff",
+      "size_bytes": 3923374
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/provenance_summary.json": {
+      "sha256": "623ffc50b7b3f635c6b77af7be890c656efd89c830984bab37fc843ea44071e8",
+      "size_bytes": 9223
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/endpoint_selection.json": {
+      "sha256": "1139c305b37c7e889f21529c8cf891b7c153cdb4e6e6d93303e5c1e5b038e1f8",
+      "size_bytes": 11332
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/first_history.json": {
+      "sha256": "6510470a0c27e863b4000289792d7c62e9fc37d03a5a18e88def879abf8a61d4",
+      "size_bytes": 441
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/parent_1190k_run_lineage.json": {
+      "sha256": "3c9ce83af35a3909ab6b5752e16fced0249d89790ddd65cba5564e108215f8ba",
+      "size_bytes": 747
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/periodic_1209k_run_lineage.json": {
+      "sha256": "ceee52e83d7281d5f82ebf488f50ba99b2f88b7c37bb0084f53386ef1e98e4cc",
+      "size_bytes": 737
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_831k/pilot.json": {
+      "sha256": "bdfef6410b322f6d700f9da17a253df3fbe1315410af13144ec9610f0484a618",
+      "size_bytes": 17632
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_831k/extraction.json": {
+      "sha256": "3de2b106539132f3a79404b18e64bccce17195195476cc87395e0923ceca7863",
+      "size_bytes": 12738
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/remote_forward_source_attestation.json": {
+      "sha256": "44673ca90f8eb74d9d260678a20698016b497f960017a94fa72c2bc026656cb8",
+      "size_bytes": 2346
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/final_token_auroc.pdf": {
+      "sha256": "104e53b98f5e0a3a3fb5696c701aa74c90b55f8b777e64c47f633654907a5685",
+      "size_bytes": 16790
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/final_token_auroc_slide.pdf": {
+      "sha256": "288c4e49f85634c83540b7f8a17a9edecdf5d11d14a690fb88175c6b7ec50080",
+      "size_bytes": 15470
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/paired_readout_differences.pdf": {
+      "sha256": "5000039d16d5671902dda7afb4f7c9e50de6393c8ab96e924131c23b59815bfc",
+      "size_bytes": 14073
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/paired_readout_differences_slide.pdf": {
+      "sha256": "ebf0953b2a303bc8dc46511bca75b748eabfa83cc83322dc99ed5db909b6c087",
+      "size_bytes": 13181
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_quality_and_associations.pdf": {
+      "sha256": "41eafe0b3aea69973b9feef8e0d565cf7529f25911425d94bc0a29f60cd8aef8",
+      "size_bytes": 17897
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_quality_and_associations_slide.pdf": {
+      "sha256": "3de93535987d37f5936aa9f6b7e531f74bc423532aa11a0bf952dd7995a5ef79",
+      "size_bytes": 17966
+    }
+  },
+  "first_histories": {
+    "parent_1190k": {
+      "run_id": "1p8b-ftjepa-t1p8b-s666k-perleaf-b1024-v6e32-20260905-115335",
+      "created_at": "2026-09-05T12:10:08Z",
+      "state": "crashed",
+      "first_history": [
+        {
+          "_timestamp": 1788610208.6781833,
+          "_step": 0,
+          "global_step": 0
+        },
+        {
+          "_timestamp": 1788610514.2868943,
+          "_step": 250,
+          "global_step": 250
+        },
+        {
+          "_timestamp": 1788610622.5658185,
+          "_step": 500,
+          "global_step": 500
+        },
+        {
+          "_timestamp": 1788610726.4302757,
+          "_step": 750,
+          "global_step": 750
+        },
+        {
+          "_timestamp": 1788610832.0585248,
+          "_step": 1000,
+          "global_step": 1000
+        }
+      ],
+      "last_global_step": 1189750.0,
+      "final_global_step": null,
+      "nominal_global_batch": null
+    },
+    "periodic_1209k": {
+      "run_id": "1p8b-ptjepa-t1190k-p50k-b1024-v6e32-20260922-062250",
+      "created_at": "2026-09-22T06:42:30Z",
+      "state": "crashed",
+      "first_history": [
+        {
+          "global_step": 0,
+          "_step": 0,
+          "_timestamp": 1790059351.57175
+        },
+        {
+          "global_step": 250,
+          "_step": 250,
+          "_timestamp": 1790059699.4170082
+        },
+        {
+          "global_step": 500,
+          "_step": 500,
+          "_timestamp": 1790059808.2790115
+        },
+        {
+          "global_step": 750,
+          "_step": 750,
+          "_timestamp": 1790059912.1329706
+        },
+        {
+          "global_step": 1000,
+          "_step": 1000,
+          "_timestamp": 1790060018.1651251
+        }
+      ],
+      "last_global_step": 1208750.0,
+      "final_global_step": null,
+      "nominal_global_batch": null
+    }
+  }
+}

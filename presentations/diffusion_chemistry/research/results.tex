@@ -1,0 +1,17 @@
+% Generated from completed artifacts by prepare_results.py.
+\newcommand{\DiffusionVerdict}{Diffusion scores lower than both JEPA checkpoints on the shared final-token chemical readout.}
+\newcommand{\DiffusionPrimaryNumber}{0.7244}
+\newcommand{\DiffusionTakeaway}{A matched token-level evaluation; training exposure and native input quantization still differ.}
+\newcommand{\ReadoutTitle}{Diffusion trails the final-token chemical readout}
+\newcommand{\ReadoutTakeaway}{Diffusion attention gains +0.0016 MACCS AUROC over mean; its paired interval includes zero.}
+\newcommand{\MaccsTargetCount}{145}
+\newcommand{\FunctionalTargetCount}{13}
+\newcommand{\BootstrapCount}{1,000}
+\newcommand{\BootstrapDefined}{980}
+\newcommand{\PairedTitle}{Paired molecules separate the checkpoint differences}
+\newcommand{\PairedTakeaway}{Attention differences: parent -0.0744; periodic -0.0506 MACCS AUROC.}
+\newcommand{\SaeTitle}{Sparse reconstruction and chemical recognition are separate}
+\newcommand{\SaeTakeaway}{Diffusion k=32 seed0: 92.8\% held-out variance explained; 3 chemical candidates frozen before test.}
+\newcommand{\ChemicalCandidateSummary}{The strongest hydroxyl candidate (f4682) has test AUROC 0.744, but also mass correlation 0.599; strict matched-pair ordering is 0.517.}
+\newcommand{\RelativeLTwoNote}{original-unit relative L2 is 0.259 for diffusion versus 0.088 / 0.054 for parent / periodic.}
+\newcommand{\ClosingTakeaway}{Token-level readouts answer chemical accessibility; SAE structure adds a separate, qualified view.}

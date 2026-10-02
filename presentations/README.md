@@ -10,10 +10,12 @@ Each standalone LaTeX presentation has its own directory, source, PDF and `build
 | Retrieval failure analysis | [17-slide deck](retrieval_failures/retrieval_failures.pdf) | [Directory](retrieval_failures/README.md) |
 | Periodic teacher semantics | [21-slide deck](periodic_semantics/periodic_semantics.pdf) | [Findings and sources](periodic_semantics/README.md) |
 | Periodic teacher overview | [Five-slide deck](periodic_semantics_overview/periodic_semantics_overview.pdf) | [Directory](periodic_semantics_overview/README.md) |
+| Encoder chemistry and interpretability | [22-slide report](encoder_chemistry/encoder_chemistry.pdf) | [Sources, diagrams and evidence](encoder_chemistry/README.md) |
+| Diffusion encoder chemistry | [Seven-slide supplement](diffusion_chemistry/diffusion_chemistry.pdf) | [Token readouts, SAE and diagram](diffusion_chemistry/README.md) |
 
 `shared/` contains the unbranded presentation theme, fonts, figure-production guide and common build helper. Headers and PDF metadata contain no company label. Original external source URLs and asset provenance remain intact.
 
-Build all six decks from the repository root:
+Build all eight decks from the repository root:
 
 ```sh
 bash presentations/build.sh

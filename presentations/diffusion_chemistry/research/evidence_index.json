@@ -1,0 +1,180 @@
+{
+  "status": "populated_from_completed_artifacts",
+  "primary_protocol": "Mean of three seed logits before AUROC; separately report mean of three seed metrics. No test-selected seed.",
+  "target_support": "Same fixed targets for all encoders/readouts: at least5 positives and5 negatives in train AND test. Exact half-credit for tied scores.",
+  "bootstrap_protocol": "Shared multinomial molecule counts across all three encoders, both readouts and all seeds. A macro replicate is undefined if any fixed target loses a class; omit the entire group replicate and report its count. Targets never vary across bootstrap replicates.",
+  "sae_protocol": "Unchanged original selector: train/validation only, up to2 features each for6 fixed concepts, no test filtering. Matched8192 random dictionary and2048 dense-channel/fixed-SAE-subset controls.",
+  "native_tokens": "Physical peaks only; CLS/padding excluded",
+  "claims": {
+    "slide1_diffusion_attention_MACCS": {
+      "estimate": 0.7243762222239358,
+      "ci95": [
+        0.7141743070952841,
+        0.734622605591546
+      ],
+      "valid_bootstrap_replicates": 980,
+      "undefined_bootstrap_replicates": 20,
+      "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+    },
+    "slide3_attention_minus_mean_MACCS": {
+      "estimate": 0.001641107054661528,
+      "ci95": [
+        -0.0002540782074020679,
+        0.003758018241813174
+      ],
+      "valid_bootstrap_replicates": 980,
+      "undefined_bootstrap_replicates": 20,
+      "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+    },
+    "slide4_paired_attention_MACCS": {
+      "parent_1190k": {
+        "estimate": -0.07435938568964238,
+        "ci95": [
+          -0.08245451359945467,
+          -0.06605560952442281
+        ],
+        "valid_bootstrap_replicates": 980,
+        "undefined_bootstrap_replicates": 20,
+        "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+      },
+      "periodic_1209k": {
+        "estimate": -0.050604192289842136,
+        "ci95": [
+          -0.0582529793018721,
+          -0.042674228229193034
+        ],
+        "valid_bootstrap_replicates": 980,
+        "undefined_bootstrap_replicates": 20,
+        "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+      }
+    },
+    "slide5_primary_diffusion_SAE_test_quality": {
+      "tokens": 22474,
+      "fve_vs_train_mean": 0.9277678724539583,
+      "relative_l2": 0.2594990546127144,
+      "centered_relative_l2": 0.26876035337460347,
+      "normalized_mse": 0.0859414332417538,
+      "mean_l0": 32.00000018323772,
+      "dead_fraction_on_split": 0.10693359375
+    },
+    "slide5_frozen_candidates": 3,
+    "slide7_illustrative_strongest_hydroxyl": {
+      "selection": "Descriptive strongest test association among the already frozen hydroxyl candidates; not an independent confirmatory case",
+      "feature": 4682,
+      "test_auroc": 0.7443515403390725,
+      "mass_spearman": 0.5989280205573657,
+      "matched_ordering": {
+        "directed_pairs": 269,
+        "unique_donors": 153,
+        "positive_anchors": 87,
+        "negative_anchors": 182,
+        "accuracy": 0.516728624535316,
+        "balanced_anchor_accuracy": 0.5228621952759884,
+        "ties": 0,
+        "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+      }
+    },
+    "slide6_nominal_presentations": {
+      "definition": "Nominal spectrum presentations = checkpoint global step \u00d7 configured global batch1024. Initial global-step zero is observed in each run. Accumulation8 is already included in global batch and is not multiplied again.",
+      "nominal_spectrum_presentations": {
+        "parent_1190k": 1218560000,
+        "periodic_1209k": 1238016000,
+        "diffusion_831k": 850944000
+      },
+      "first_logged_global_steps": {
+        "parent_1190k": 0,
+        "periodic_1209k": 0,
+        "diffusion_831k": 0
+      },
+      "diffusion_time_limit_hours": 95,
+      "diffusion_stopped_for_time_limit": true,
+      "diffusion_global_batch_recorded": 1024,
+      "limitations": [
+        "Not unique spectra or molecular counts; examples may repeat.",
+        "Does not prove identical example ordering, unbroken execution, or equal optimization compute.",
+        "Parent/periodic teacher training history is not added to student input presentations.",
+        "Periodic1209k is a fresh-student run beginning at0, not19k updates of parent1190k."
+      ]
+    }
+  },
+  "figure_sources": {
+    "final_token_auroc": "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/final_token_auroc_slide.pdf",
+    "paired_readout_differences": "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/paired_readout_differences_slide.pdf",
+    "sae_quality_and_associations": "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_quality_and_associations_slide.pdf"
+  },
+  "source_files": {
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/readout_comparison.json": {
+      "sha256": "d8030f2fb9677c0bbc2c233e4e12ea034caf4b90074818b6740ef56dcc4cdede",
+      "size_bytes": 2414569
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_comparison.json": {
+      "sha256": "fe900624bf13d50ab87414392dd8d2b29770b4e1e6e5d198acac7277630c9dff",
+      "size_bytes": 3923374
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/provenance_summary.json": {
+      "sha256": "623ffc50b7b3f635c6b77af7be890c656efd89c830984bab37fc843ea44071e8",
+      "size_bytes": 9223
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/endpoint_selection.json": {
+      "sha256": "1139c305b37c7e889f21529c8cf891b7c153cdb4e6e6d93303e5c1e5b038e1f8",
+      "size_bytes": 11332
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/first_history.json": {
+      "sha256": "6510470a0c27e863b4000289792d7c62e9fc37d03a5a18e88def879abf8a61d4",
+      "size_bytes": 441
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/parent_1190k_run_lineage.json": {
+      "sha256": "3c9ce83af35a3909ab6b5752e16fced0249d89790ddd65cba5564e108215f8ba",
+      "size_bytes": 747
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/periodic_1209k_run_lineage.json": {
+      "sha256": "ceee52e83d7281d5f82ebf488f50ba99b2f88b7c37bb0084f53386ef1e98e4cc",
+      "size_bytes": 737
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_831k/pilot.json": {
+      "sha256": "bdfef6410b322f6d700f9da17a253df3fbe1315410af13144ec9610f0484a618",
+      "size_bytes": 17632
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_831k/extraction.json": {
+      "sha256": "3de2b106539132f3a79404b18e64bccce17195195476cc87395e0923ceca7863",
+      "size_bytes": 12738
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/remote_forward_source_attestation.json": {
+      "sha256": "44673ca90f8eb74d9d260678a20698016b497f960017a94fa72c2bc026656cb8",
+      "size_bytes": 2346
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/final_token_auroc.pdf": {
+      "sha256": "104e53b98f5e0a3a3fb5696c701aa74c90b55f8b777e64c47f633654907a5685",
+      "size_bytes": 16790
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/final_token_auroc_slide.pdf": {
+      "sha256": "288c4e49f85634c83540b7f8a17a9edecdf5d11d14a690fb88175c6b7ec50080",
+      "size_bytes": 15470
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/paired_readout_differences.pdf": {
+      "sha256": "5000039d16d5671902dda7afb4f7c9e50de6393c8ab96e924131c23b59815bfc",
+      "size_bytes": 14073
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/paired_readout_differences_slide.pdf": {
+      "sha256": "ebf0953b2a303bc8dc46511bca75b748eabfa83cc83322dc99ed5db909b6c087",
+      "size_bytes": 13181
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_quality_and_associations.pdf": {
+      "sha256": "41eafe0b3aea69973b9feef8e0d565cf7529f25911425d94bc0a29f60cd8aef8",
+      "size_bytes": 17897
+    },
+    "artifacts/encoder_chemistry_20260930/diffusion_extension/diffusion_831k/sae_quality_and_associations_slide.pdf": {
+      "sha256": "3de93535987d37f5936aa9f6b7e531f74bc423532aa11a0bf952dd7995a5ef79",
+      "size_bytes": 17966
+    }
+  },
+  "compact_inputs_sha256": "bfa1196483b7a8de731884b2c7e4a54a93a4776ef3043883646f6bd5d1f1514b",
+  "plotting_source_sha256": "f3259e61728ccc6fbade87b758243fd00dce9c2cce275fc37a7d573e0b696021",
+  "limits": [
+    "Descriptive checkpoint comparison, not a controlled objective experiment",
+    "Scores are not calibrated molecular probabilities",
+    "No diffusion feature ablation or mechanistic sufficiency claim",
+    "No measured token-to-fragment assignments",
+    "One pretrained encoder per recipe"
+  ]
+}

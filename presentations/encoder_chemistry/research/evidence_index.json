@@ -1,0 +1,3080 @@
+{
+  "schema": "encoder_chemistry_presentation_evidence_v1",
+  "created_at_utc": "2026-09-30T03:59:11.303356+00:00",
+  "artifact_root_from_repository": "artifacts/encoder_chemistry_20260930",
+  "deck": "presentations/encoder_chemistry/encoder_chemistry.tex",
+  "status": "Final22-pagePDF visually and scientifically reviewed; automated layout/vector/font checks pass.",
+  "contrasts": "Latest minus parent unless explicitly stated. NegativeAUROC/chemicalsimilarity favorsparent; positiveBCEdamage meansworse.",
+  "protocols": {
+    "checkpoint_scope": "Parent1190k is the initialization teacher of this periodic run. Student1209k is not a19k-step continuation of parent weights. Historical1034k and Torch-derived results are distinct.",
+    "panel": "4096train/1024validation/1024test distinct connectivity identities. Same-molecule acquisitions are paired observations, not independent molecules. Prior benchmark exposure and unknown pretraining overlap remain.",
+    "primary_readout_auroc": "Three fitted seeds0/1/2; ensemble arithmetic mean of LOGITS, then tie-correct AUROC. Macro uses fixed targets with>=5positives and negatives in train and evaluatedcohort (fulltest145MACCS,7elements,13FG). Test1024molecules. Paired1000molecule bootstrap,pointwiseCIs,undefined fixed-target replicates omitted. Same per-token LayerNorm/sharedclassifier; attention adds4queries8192parameters.",
+    "token_geometry": "Mean/max/CLS ridge probes all28states. Token diagnostics depths0,5,10,13,19,25,26,27; rank uses fixed256-D randomprojection over all6144panelmolecules. Observable regressions fittrain/selectvalidation/evaluatetest. Descriptive rank is not full intrinsicdimension.",
+    "sae_reconstruction": "Raw19 validphysicaltokens only;8192features; topk32primary plus seed1/k64controls. Train-only center/scalarRMS. Equal totalweightpermolecule,validationselectedweights. TestFVE relative to trainmean; not downstream taskperformance.",
+    "sae_feature_discovery": "Perdictionary train/validation selects<=2features for eachfixedconcept; allfrozenfeaturesretained ontest. IDs differ acrossdicts. Per-concept mean of selectedfeatureAUROC,not besttestfeature. Chemistrylabelsdo not enterSAEfit.",
+    "sae_stability": "Map features by positive-direction trainactivationSpearman without chemistrylabels. Report heldoutSpearman and alignedfeaturechemistry; multiplefeatures maymap tosamereplica. Stability is not monosemanticity.",
+    "sae_causal": "Fixed512testmolecules; physicalraw19 states; residualpreserving half/full feature removal and same requestedamplitude randomfeature/orthogonalrandomdirectioncontrols. Logitshifts average3heads; losses/AUROC use mean SIGMOID(logits). Class-balancedBCE supportedtargets>=5bothclasses in train+cohort. Fortyfull-dose feature-minus-control pairedt comparisons acrossarms useHolm; secondary2000moleculebootstrapCIsunadjusted. Realizedbf16 dosesapproximatelymatched. No positivesteering/sufficiency.",
+    "illustrative_cases": "Highest activation positive/negative TESTexamples chosen afterfrozenselection/confirmation; descriptiveillustrations only. Positive/negative molecularlabels and peaks are real; no groundtruthpeakfragmentassignments.",
+    "chemical_geometry": "SAEmoleculemax vectors retrieve trainmolecules fromtestqueries bycosine; MorganTanimoto/FGJaccarddescriptive. Fullbank1024queries. Strictnuisancebank472queries with>=2candidates; mass5Da/CE10/peakcount5calipers plusfixedacquisitioncategories. Paired1000moleculebootstrap; observational,notchemicalcounterfactual.",
+    "components": "Selecttop3layersperbranch on256validationmolecules; evaluate512testmolecules,39variants including24heads. Mean SIGMOID(logits) across3readouts; class-balancedBCE on fixedsupportedtargets. Paired2000moleculebootstrap unadjusted; largesttesteffectisdescriptive. Zeroablations not additive or equalnormcomponents.",
+    "activation_rescue": "256testmolecules;top20%intensityattenuation; patch selectedphysicalslots versus samecountuncorruptedrandomslots at raw0..25. Allslotcleanpatch exact; preserveoriginalmetadata. LogitMSE and class-balancedBCE are separate endpoints. Paired2000moleculebootstrap acrossmolecules,pointwise.",
+    "input_effects": "1024testmolecules,genericperturbations; use exacteligiblepairedcohort pervariant. Mean SIGMOID(logits) across3frozen final27attentionreadouts, ordinaryunweightedBCE across177trainnonconstantoutputs. Paired2000moleculebootstrap. Weaklosssupport4\u201354isexploratory; no significanceclaims.",
+    "metadata_factorial": "689same-fullidentity/instrument/adductobservedCEpairs. Original/repeatspectrum\u00d7original/repeatmetadata and raw25block/finalpathfactorials reuse nativegraph. Mean SIGMOID(logits),ordinary177targetBCE. Repeatcosine is readoutLOGITvectorcosine,notembeddingcosine. Paired2000moleculebootstrap; interactionincludesreadout/lossnonlinearity.",
+    "native_numerics": "H100nativeJAXBF16,B8,fullEncoderTrace dynamiccontrols; separateencoder/readoutcompilation,losslessuint16bf16cache. Exactnative/shamchecks; Torch/initialB16notpooledwithnativeconclusions.",
+    "interpretation": "Scopedcheckpointstudy; no trainingrecipe causalidentification, entireparameterdecomposition, atomfragmentcircuit, or validated head-feature mediation. Fixedreadout computationalintervention effects are conditional endpoints.",
+    "reproducibility": "Repository .venv, nativeJAX, directloops. Eachstagecontract hashes its actualsources/inputs/weights; finalsourceZIP is supplemental. RebuildingGPUstagesrequiresresources; presentation rebuild uses savedmeasurementJSONs."
+  },
+  "slides": [
+    {
+      "slide": 1,
+      "title": "Main verdict",
+      "claims": [
+        "Latest sparse reconstruction is better; an overall chemical improvement is not demonstrated.",
+        "Parent chemistry advantage persists with learned physical-token attention."
+      ],
+      "endpoints": [
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth19~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.8014416106034217,
+            "ci95": [
+              0.7924067194479192,
+              0.8100777101639993
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth19~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7836129487107675,
+            "ci95": [
+              0.7737580726265211,
+              0.7933513491819377
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth19_attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": -0.017828661892654307,
+            "ci95": [
+              -0.02282269978412392,
+              -0.012501230446953879
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth19~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.803630241383985,
+            "ci95": [
+              0.7822418684700743,
+              0.8233431938258289
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth19~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.7838554528994693,
+            "ci95": [
+              0.7599923130619289,
+              0.8055330444265129
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth19_attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": -0.019774788484515585,
+            "ci95": [
+              -0.03489874012144114,
+              -0.005478240217183374
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth27~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7987356079135781,
+            "ci95": [
+              0.7889211609949248,
+              0.8077746951403287
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth27~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7749804145137779,
+            "ci95": [
+              0.7653614970960044,
+              0.7850349048353099
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth27_attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": -0.02375519339980025,
+            "ci95": [
+              -0.029851756202600454,
+              -0.017621132166551628
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth27~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.8056343074543845,
+            "ci95": [
+              0.7830633886234365,
+              0.8256625476787242
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth27~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.7767454114667655,
+            "ci95": [
+              0.7549077555624649,
+              0.7975217931666968
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth27_attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": -0.028888895987618894,
+            "ci95": [
+              -0.04314415492495274,
+              -0.013155491115135315
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/attention_minus_mean_periodic_1209k_depth19/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.005202158424265444,
+            "ci95": [
+              0.0035191557204316114,
+              0.007111198673419121
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          }
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/attention_minus_mean_periodic_1209k_depth19/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.006492508086657074,
+            "ci95": [
+              0.0029768736983672942,
+              0.010012176827631364
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          }
+        }
+      ],
+      "evidence": [
+        "sae_reconstruction_comparison.json"
+      ],
+      "protocol": "primary_readout_auroc"
+    },
+    {
+      "slide": 2,
+      "title": "Checkpoint lineage",
+      "claims": [
+        "Periodic checkpoint1209000 is the evaluated student; parent1190000 initializes the frozen teacher.",
+        "Student starts fresh; teacher promotion interval50000. Not19000additional student updates from parent weights."
+      ],
+      "endpoints": [
+        {
+          "artifact": "endpoint_selection.json",
+          "pointer": "/uri",
+          "value": "gs://metal-repeater-411410-spectra-checkpoints/skypilot/1p8b-ptjepa-t1190k-p50k-b1024-v6e32-20260922-062250/checkpoints/orbax/1209000"
+        },
+        {
+          "artifact": "periodic_config.json",
+          "pointer": "/frozen_teacher_checkpoint_path",
+          "value": "gs://metal-repeater-411410-spectra-checkpoints/skypilot/1p8b-ftjepa-t1p8b-s666k-perleaf-b1024-v6e32-20260905-115335/checkpoints/orbax/1190000"
+        },
+        {
+          "artifact": "periodic_config.json",
+          "pointer": "/frozen_teacher_update_every_steps",
+          "value": 50000
+        }
+      ],
+      "evidence": [
+        "parent_config.json",
+        "periodic_config.json"
+      ],
+      "figure_stem": "checkpoint_lineage",
+      "protocol": "checkpoint_scope"
+    },
+    {
+      "slide": 3,
+      "title": "Panel and selection",
+      "claims": [
+        "Connectivity-disjoint official folds; a representative spectrum per selected molecule.",
+        "Readout/feature/component discovery precedes held-out evaluation; prior benchmark exposure and unknown pretraining overlap remain."
+      ],
+      "endpoints": [
+        {
+          "artifact": "panel/manifest.json",
+          "pointer": "/primary_molecules",
+          "value": {
+            "train": 4096,
+            "val": 1024,
+            "test": 1024
+          }
+        },
+        {
+          "artifact": "panel/manifest.json",
+          "pointer": "/unseen_nonempty_train_scaffold_counts",
+          "value": {
+            "train": 0,
+            "val": 971,
+            "test": 982
+          }
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/groups/MACCS/targets",
+          "value": 145
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/groups/functional_groups/targets",
+          "value": 13
+        }
+      ],
+      "evidence": [
+        "panel/identity_audit.json",
+        "panel/matching_audit.json"
+      ],
+      "protocol": "panel"
+    },
+    {
+      "slide": 4,
+      "title": "Token-aware readouts",
+      "claims": [
+        "Mean pooling obscures some accessible chemistry; learned-query pooling adds8192parameters to the shared classifier.",
+        "Three-seed ensembles use mean logits for AUROC."
+      ],
+      "endpoints": [
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth19~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.8014416106034217,
+            "ci95": [
+              0.7924067194479192,
+              0.8100777101639993
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth19~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7836129487107675,
+            "ci95": [
+              0.7737580726265211,
+              0.7933513491819377
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth19_attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": -0.017828661892654307,
+            "ci95": [
+              -0.02282269978412392,
+              -0.012501230446953879
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw19 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth19~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.803630241383985,
+            "ci95": [
+              0.7822418684700743,
+              0.8233431938258289
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth19~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.7838554528994693,
+            "ci95": [
+              0.7599923130619289,
+              0.8055330444265129
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth19_attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": -0.019774788484515585,
+            "ci95": [
+              -0.03489874012144114,
+              -0.005478240217183374
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw19 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth27~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7987356079135781,
+            "ci95": [
+              0.7889211609949248,
+              0.8077746951403287
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth27~1attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.7749804145137779,
+            "ci95": [
+              0.7653614970960044,
+              0.7850349048353099
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth27_attention/groups/MACCS/ensemble",
+          "value": {
+            "estimate": -0.02375519339980025,
+            "ci95": [
+              -0.029851756202600454,
+              -0.017621132166551628
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw27 MACCS"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/parent_1190k~1depth27~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.8056343074543845,
+            "ci95": [
+              0.7830633886234365,
+              0.8256625476787242
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "parent_1190k raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/models/periodic_1209k~1depth27~1attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.7767454114667655,
+            "ci95": [
+              0.7549077555624649,
+              0.7975217931666968
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "periodic_1209k raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/checkpoint_depth27_attention/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": -0.028888895987618894,
+            "ci95": [
+              -0.04314415492495274,
+              -0.013155491115135315
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          },
+          "label": "Latest minus parent raw27 functional_groups"
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/attention_minus_mean_periodic_1209k_depth19/groups/MACCS/ensemble",
+          "value": {
+            "estimate": 0.005202158424265444,
+            "ci95": [
+              0.0035191557204316114,
+              0.007111198673419121
+            ],
+            "valid_bootstrap_replicates": 980,
+            "undefined_bootstrap_replicates": 20,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          }
+        },
+        {
+          "artifact": "readout_comparison/comparison.json",
+          "pointer": "/cohorts/test/contrasts/attention_minus_mean_periodic_1209k_depth19/groups/functional_groups/ensemble",
+          "value": {
+            "estimate": 0.006492508086657074,
+            "ci95": [
+              0.0029768736983672942,
+              0.010012176827631364
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          }
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "token_attention",
+      "protocol": "primary_readout_auroc"
+    },
+    {
+      "slide": 5,
+      "title": "Layer and token geometry",
+      "claims": [
+        "Pooled chemistry covers28states; token diagnostics cover8selected depths.",
+        "Rank depends strongly on layer; the256-D projected descriptive estimate does not justify uniform collapse."
+      ],
+      "endpoints": [
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/0",
+          "value": {
+            "depth": 0,
+            "mean_valid_peak_cosine": 0.45290227917844933,
+            "median_within_spectrum_variance_fraction": 0.5642945816490583,
+            "median_token_l2": 26.492701418973112,
+            "projected_token_effective_rank": 13.4753999710083,
+            "input_linear_r2_mz": 0.9999418258666992,
+            "input_linear_r2_intensity": 0.9999249577522278,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth0"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/1",
+          "value": {
+            "depth": 5,
+            "mean_valid_peak_cosine": 0.8686472808926192,
+            "median_within_spectrum_variance_fraction": 0.12735439594132308,
+            "median_token_l2": 139.93241373697916,
+            "projected_token_effective_rank": 55.62028503417969,
+            "input_linear_r2_mz": 0.9678728580474854,
+            "input_linear_r2_intensity": 0.9597215056419373,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth5"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/2",
+          "value": {
+            "depth": 10,
+            "mean_valid_peak_cosine": 0.9204339268569094,
+            "median_within_spectrum_variance_fraction": 0.0768882704355126,
+            "median_token_l2": 221.42538269564636,
+            "projected_token_effective_rank": 87.64869689941406,
+            "input_linear_r2_mz": 0.9366792440414429,
+            "input_linear_r2_intensity": 0.8861159682273865,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth10"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/3",
+          "value": {
+            "depth": 13,
+            "mean_valid_peak_cosine": 0.9537189098282256,
+            "median_within_spectrum_variance_fraction": 0.04597747558914206,
+            "median_token_l2": 337.2709670293899,
+            "projected_token_effective_rank": 103.35623931884766,
+            "input_linear_r2_mz": 0.8993196487426758,
+            "input_linear_r2_intensity": 0.8365687727928162,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth13"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/4",
+          "value": {
+            "depth": 19,
+            "mean_valid_peak_cosine": 0.9802590137252732,
+            "median_within_spectrum_variance_fraction": 0.021256630592767334,
+            "median_token_l2": 802.106953876963,
+            "projected_token_effective_rank": 113.57635498046875,
+            "input_linear_r2_mz": 0.8004348874092102,
+            "input_linear_r2_intensity": 0.6921179890632629,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth19"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/5",
+          "value": {
+            "depth": 25,
+            "mean_valid_peak_cosine": 0.7879298114433798,
+            "median_within_spectrum_variance_fraction": 0.162543760165343,
+            "median_token_l2": 1903.1151204427083,
+            "projected_token_effective_rank": 3.2742488384246826,
+            "input_linear_r2_mz": 0.6944077014923096,
+            "input_linear_r2_intensity": 0.5512808561325073,
+            "input_probe_penalties": [
+              0.1,
+              100.0
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth25"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/6",
+          "value": {
+            "depth": 26,
+            "mean_valid_peak_cosine": 0.7879306671588173,
+            "median_within_spectrum_variance_fraction": 0.15681355093203353,
+            "median_token_l2": 45.25445079828779,
+            "projected_token_effective_rank": 3.412248134613037,
+            "input_linear_r2_mz": 0.6821826100349426,
+            "input_linear_r2_intensity": 0.5487965941429138,
+            "input_probe_penalties": [
+              0.1,
+              100.0
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth26"
+        },
+        {
+          "artifact": "parent_1190k/atlas.json",
+          "pointer": "/token_geometry/7",
+          "value": {
+            "depth": 27,
+            "mean_valid_peak_cosine": 0.9025487422797872,
+            "median_within_spectrum_variance_fraction": 0.10054444486110897,
+            "median_token_l2": 60.49846685500372,
+            "projected_token_effective_rank": 15.626349449157715,
+            "input_linear_r2_mz": 0.7379814386367798,
+            "input_linear_r2_intensity": 0.6037219762802124,
+            "input_probe_penalties": [
+              0.1,
+              100.0
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "parent_1190k depth27"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/0",
+          "value": {
+            "depth": 0,
+            "mean_valid_peak_cosine": 0.5404560089341613,
+            "median_within_spectrum_variance_fraction": 0.5323578525655386,
+            "median_token_l2": 13.00299357624797,
+            "projected_token_effective_rank": 5.880184173583984,
+            "input_linear_r2_mz": 0.9999507665634155,
+            "input_linear_r2_intensity": 0.9999150037765503,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth0"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/1",
+          "value": {
+            "depth": 5,
+            "mean_valid_peak_cosine": 0.8385801280870705,
+            "median_within_spectrum_variance_fraction": 0.16494796988445948,
+            "median_token_l2": 54.45773247612847,
+            "projected_token_effective_rank": 31.379030227661133,
+            "input_linear_r2_mz": 0.9909126162528992,
+            "input_linear_r2_intensity": 0.9799830317497253,
+            "input_probe_penalties": [
+              0.1,
+              100.0
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth5"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/2",
+          "value": {
+            "depth": 10,
+            "mean_valid_peak_cosine": 0.9101589383943783,
+            "median_within_spectrum_variance_fraction": 0.09650511933876238,
+            "median_token_l2": 107.09609970933809,
+            "projected_token_effective_rank": 26.961008071899414,
+            "input_linear_r2_mz": 0.9733883142471313,
+            "input_linear_r2_intensity": 0.9426695704460144,
+            "input_probe_penalties": [
+              0.1,
+              10.0
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth10"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/3",
+          "value": {
+            "depth": 13,
+            "mean_valid_peak_cosine": 0.9696070777469296,
+            "median_within_spectrum_variance_fraction": 0.03498187354640936,
+            "median_token_l2": 222.95421324772622,
+            "projected_token_effective_rank": 39.795562744140625,
+            "input_linear_r2_mz": 0.9514532685279846,
+            "input_linear_r2_intensity": 0.9028183221817017,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth13"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/4",
+          "value": {
+            "depth": 19,
+            "mean_valid_peak_cosine": 0.9897856260829849,
+            "median_within_spectrum_variance_fraction": 0.02206712679733991,
+            "median_token_l2": 1519.3546534503632,
+            "projected_token_effective_rank": 16.51653289794922,
+            "input_linear_r2_mz": 0.7572845220565796,
+            "input_linear_r2_intensity": 0.6398685574531555,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth19"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/5",
+          "value": {
+            "depth": 25,
+            "mean_valid_peak_cosine": 0.9439316270557567,
+            "median_within_spectrum_variance_fraction": 0.09033736874776949,
+            "median_token_l2": 2437.432676373106,
+            "projected_token_effective_rank": 21.08539581298828,
+            "input_linear_r2_mz": 0.6834573745727539,
+            "input_linear_r2_intensity": 0.5159999132156372,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth25"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/6",
+          "value": {
+            "depth": 26,
+            "mean_valid_peak_cosine": 0.9439373572066256,
+            "median_within_spectrum_variance_fraction": 0.051640189310468154,
+            "median_token_l2": 45.25791097952462,
+            "projected_token_effective_rank": 156.13226318359375,
+            "input_linear_r2_mz": 0.6625797152519226,
+            "input_linear_r2_intensity": 0.5368096232414246,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth26"
+        },
+        {
+          "artifact": "periodic_1209k/atlas.json",
+          "pointer": "/token_geometry/7",
+          "value": {
+            "depth": 27,
+            "mean_valid_peak_cosine": 0.8550342334742552,
+            "median_within_spectrum_variance_fraction": 0.13947930184695784,
+            "median_token_l2": 28.137651636980582,
+            "projected_token_effective_rank": 102.98810577392578,
+            "input_linear_r2_mz": 0.7076743841171265,
+            "input_linear_r2_intensity": 0.6641649603843689,
+            "input_probe_penalties": [
+              0.1,
+              0.1
+            ],
+            "input_test_tokens": 7953
+          },
+          "label": "periodic_1209k depth27"
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "token_geometry",
+      "protocol": "token_geometry"
+    },
+    {
+      "slide": 6,
+      "title": "SAE feature intervention",
+      "claims": [
+        "TopK code is fitted without chemical labels at raw19; reconstruction is evaluated on held-out molecules.",
+        "Subtract feature direction from ORIGINAL state, preserving residual error; separate reconstruction baseline.",
+        "Same requested amplitudes feed feature/random-feature/orthogonal-random directions; physical tokens only,CLS untouched."
+      ],
+      "endpoints": [],
+      "evidence": [
+        "sae_causal_review.json",
+        "sae_causal_analysis/sae_causal_analysis.json"
+      ],
+      "figure_stem": "token_sae_interventions",
+      "protocol": "sae_causal"
+    },
+    {
+      "slide": 7,
+      "title": "SAE reconstruction",
+      "claims": [
+        "Six dictionaries: both checkpoints,k32seed0,k32seed1,k64seed0.",
+        "Greater held-out variance explained means better reconstruction under this SAE setup, not more semantic features; all fits selected the40epoch budget endpoint."
+      ],
+      "endpoints": [
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/0/quality/test/fve_vs_train_mean",
+          "value": 0.728230229980326,
+          "label": "parent_1190k k32 seed0 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/0/quality/test/relative_l2",
+          "value": 0.08756587939905093,
+          "label": "parent_1190k k32 seed0 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/0/quality/test/dead_fraction_on_split",
+          "value": 0.01220703125,
+          "label": "parent_1190k k32 seed0 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/0/selected_epoch",
+          "value": 40,
+          "label": "parent_1190k k32 seed0 selectedepoch"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/1/quality/test/fve_vs_train_mean",
+          "value": 0.7273253683270231,
+          "label": "parent_1190k k32 seed1 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/1/quality/test/relative_l2",
+          "value": 0.08774694821672266,
+          "label": "parent_1190k k32 seed1 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/1/quality/test/dead_fraction_on_split",
+          "value": 0.011474609375,
+          "label": "parent_1190k k32 seed1 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/1/selected_epoch",
+          "value": 40,
+          "label": "parent_1190k k32 seed1 selectedepoch"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/2/quality/test/fve_vs_train_mean",
+          "value": 0.7544874864381483,
+          "label": "parent_1190k k64 seed0 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/2/quality/test/relative_l2",
+          "value": 0.08322832538838763,
+          "label": "parent_1190k k64 seed0 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/2/quality/test/dead_fraction_on_split",
+          "value": 0.000244140625,
+          "label": "parent_1190k k64 seed0 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/2/selected_epoch",
+          "value": 40,
+          "label": "parent_1190k k64 seed0 selectedepoch"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/3/quality/test/fve_vs_train_mean",
+          "value": 0.890880706680881,
+          "label": "periodic_1209k k32 seed0 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/3/quality/test/relative_l2",
+          "value": 0.053802150043631106,
+          "label": "periodic_1209k k32 seed0 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/3/quality/test/dead_fraction_on_split",
+          "value": 0.0616455078125,
+          "label": "periodic_1209k k32 seed0 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/3/selected_epoch",
+          "value": 40,
+          "label": "periodic_1209k k32 seed0 selectedepoch"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/4/quality/test/fve_vs_train_mean",
+          "value": 0.8919191838490849,
+          "label": "periodic_1209k k32 seed1 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/4/quality/test/relative_l2",
+          "value": 0.05359727136329164,
+          "label": "periodic_1209k k32 seed1 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/4/quality/test/dead_fraction_on_split",
+          "value": 0.062744140625,
+          "label": "periodic_1209k k32 seed1 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/4/selected_epoch",
+          "value": 40,
+          "label": "periodic_1209k k32 seed1 selectedepoch"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/5/quality/test/fve_vs_train_mean",
+          "value": 0.9063710961145324,
+          "label": "periodic_1209k k64 seed0 fve_vs_train_mean"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/5/quality/test/relative_l2",
+          "value": 0.04983722227412983,
+          "label": "periodic_1209k k64 seed0 relative_l2"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/5/quality/test/dead_fraction_on_split",
+          "value": 0.0052490234375,
+          "label": "periodic_1209k k64 seed0 dead_fraction_on_split"
+        },
+        {
+          "artifact": "sae_reconstruction_comparison.json",
+          "pointer": "/results/5/selected_epoch",
+          "value": 40,
+          "label": "periodic_1209k k64 seed0 selectedepoch"
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "sae_reconstruction",
+      "protocol": "sae_reconstruction"
+    },
+    {
+      "slide": 8,
+      "title": "Chemical feature associations",
+      "claims": [
+        "All10frozen features per encoder retained; no amine feature qualified.",
+        "Association quality varies by concept; nitrile failures and nuisance-correlated hydroxyl features remain visible."
+      ],
+      "endpoints": [
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/0/test_association/auroc",
+          "value": 0.5843179008105509,
+          "label": "parent_1190k f2164 fg_amide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/1/test_association/auroc",
+          "value": 0.6078979102746104,
+          "label": "parent_1190k f7370 fg_amide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/2/test_association/auroc",
+          "value": 0.6151749785605911,
+          "label": "parent_1190k f3678 fg_hydroxyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/3/test_association/auroc",
+          "value": 0.6246845933109045,
+          "label": "parent_1190k f2182 fg_hydroxyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/4/test_association/auroc",
+          "value": 0.6906205610795454,
+          "label": "parent_1190k f738 fg_halide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/5/test_association/auroc",
+          "value": 0.6633678089488636,
+          "label": "parent_1190k f4407 fg_halide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/6/test_association/auroc",
+          "value": 0.5036501024590163,
+          "label": "parent_1190k f6482 fg_nitrile"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/7/test_association/auroc",
+          "value": 0.5439506489071039,
+          "label": "parent_1190k f2652 fg_nitrile"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/8/test_association/auroc",
+          "value": 0.6228372791193744,
+          "label": "parent_1190k f1347 fg_sulfonyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/9/test_association/auroc",
+          "value": 0.5946330287309404,
+          "label": "parent_1190k f2360 fg_sulfonyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/0/test_association/auroc",
+          "value": 0.5673398360580666,
+          "label": "periodic_1209k f6122 fg_amide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/1/test_association/auroc",
+          "value": 0.587437605898246,
+          "label": "periodic_1209k f5287 fg_amide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/2/test_association/auroc",
+          "value": 0.5957537601424896,
+          "label": "periodic_1209k f1823 fg_hydroxyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/3/test_association/auroc",
+          "value": 0.5906144864436969,
+          "label": "periodic_1209k f1372 fg_hydroxyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/4/test_association/auroc",
+          "value": 0.6750776811079546,
+          "label": "periodic_1209k f7363 fg_halide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/5/test_association/auroc",
+          "value": 0.6324396306818181,
+          "label": "periodic_1209k f1707 fg_halide"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/6/test_association/auroc",
+          "value": 0.49581625683060115,
+          "label": "periodic_1209k f3348 fg_nitrile"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/7/test_association/auroc",
+          "value": 0.5310472165300546,
+          "label": "periodic_1209k f6208 fg_nitrile"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/8/test_association/auroc",
+          "value": 0.5675611618781766,
+          "label": "periodic_1209k f5160 fg_sulfonyl"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/9/test_association/auroc",
+          "value": 0.7053169357174834,
+          "label": "periodic_1209k f3055 fg_sulfonyl"
+        }
+      ],
+      "evidence": [
+        "sae_comparison/comparison.json"
+      ],
+      "figure_stem": "chemical_features",
+      "protocol": "sae_feature_discovery"
+    },
+    {
+      "slide": 9,
+      "title": "Feature stability",
+      "claims": [
+        "Alignment uses train-only molecule-max activations, without chemical-label remapping.",
+        "Replicated activation does not guarantee useful chemistry; features can split or share the same aligned replica.",
+        "Displayed stability points average the two frozen features per concept; no uncertainty or independent-replicate claim."
+      ],
+      "endpoints": [
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/0/activation_alignment/test_spearman",
+          "value": 0.493851847195933,
+          "label": "parent_1190k f2164 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/1/activation_alignment/test_spearman",
+          "value": 0.434876513135349,
+          "label": "parent_1190k f7370 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/2/activation_alignment/test_spearman",
+          "value": 0.8044815843775814,
+          "label": "parent_1190k f3678 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/3/activation_alignment/test_spearman",
+          "value": 0.6963952920618381,
+          "label": "parent_1190k f2182 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/4/activation_alignment/test_spearman",
+          "value": 0.9011334448775389,
+          "label": "parent_1190k f738 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/5/activation_alignment/test_spearman",
+          "value": 0.5808642907755858,
+          "label": "parent_1190k f4407 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/6/activation_alignment/test_spearman",
+          "value": 0.811108402751234,
+          "label": "parent_1190k f6482 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/7/activation_alignment/test_spearman",
+          "value": 0.7062809337022492,
+          "label": "parent_1190k f2652 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/8/activation_alignment/test_spearman",
+          "value": 0.6829504734814666,
+          "label": "parent_1190k f1347 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/9/activation_alignment/test_spearman",
+          "value": 0.5190915338349315,
+          "label": "parent_1190k f2360 k32_seed1"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/0/activation_alignment/test_spearman",
+          "value": 0.5726103432908288,
+          "label": "parent_1190k f2164 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/1/activation_alignment/test_spearman",
+          "value": 0.6437254851850707,
+          "label": "parent_1190k f7370 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/2/activation_alignment/test_spearman",
+          "value": 0.7739033713257577,
+          "label": "parent_1190k f3678 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/3/activation_alignment/test_spearman",
+          "value": 0.8332758477480117,
+          "label": "parent_1190k f2182 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/4/activation_alignment/test_spearman",
+          "value": 0.8225976455960949,
+          "label": "parent_1190k f738 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/5/activation_alignment/test_spearman",
+          "value": 0.6456223234379763,
+          "label": "parent_1190k f4407 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/6/activation_alignment/test_spearman",
+          "value": 0.7765451381808979,
+          "label": "parent_1190k f6482 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/7/activation_alignment/test_spearman",
+          "value": 0.6383525808797604,
+          "label": "parent_1190k f2652 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/8/activation_alignment/test_spearman",
+          "value": 0.7365941783812567,
+          "label": "parent_1190k f1347 k64_seed0"
+        },
+        {
+          "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/9/activation_alignment/test_spearman",
+          "value": 0.5128545036271646,
+          "label": "parent_1190k f2360 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/0/activation_alignment/test_spearman",
+          "value": 0.5109156242449825,
+          "label": "periodic_1209k f6122 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/1/activation_alignment/test_spearman",
+          "value": 0.5623455753918707,
+          "label": "periodic_1209k f5287 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/2/activation_alignment/test_spearman",
+          "value": 0.8337651538711838,
+          "label": "periodic_1209k f1823 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/3/activation_alignment/test_spearman",
+          "value": 0.5612381809302045,
+          "label": "periodic_1209k f1372 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/4/activation_alignment/test_spearman",
+          "value": 0.8949248671076101,
+          "label": "periodic_1209k f7363 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/5/activation_alignment/test_spearman",
+          "value": 0.7690896940148833,
+          "label": "periodic_1209k f1707 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/6/activation_alignment/test_spearman",
+          "value": 0.800159975668075,
+          "label": "periodic_1209k f3348 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/7/activation_alignment/test_spearman",
+          "value": 0.7341604859761216,
+          "label": "periodic_1209k f6208 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/8/activation_alignment/test_spearman",
+          "value": 0.5941816067168776,
+          "label": "periodic_1209k f5160 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+          "pointer": "/records/9/activation_alignment/test_spearman",
+          "value": 0.6039408998131758,
+          "label": "periodic_1209k f3055 k32_seed1"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/0/activation_alignment/test_spearman",
+          "value": 0.5601518734197413,
+          "label": "periodic_1209k f6122 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/1/activation_alignment/test_spearman",
+          "value": 0.58412422811894,
+          "label": "periodic_1209k f5287 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/2/activation_alignment/test_spearman",
+          "value": 0.7488168106151601,
+          "label": "periodic_1209k f1823 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/3/activation_alignment/test_spearman",
+          "value": 0.5571890447574119,
+          "label": "periodic_1209k f1372 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/4/activation_alignment/test_spearman",
+          "value": 0.8327535167752759,
+          "label": "periodic_1209k f7363 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/5/activation_alignment/test_spearman",
+          "value": 0.8568260084683623,
+          "label": "periodic_1209k f1707 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/6/activation_alignment/test_spearman",
+          "value": 0.9111813917688009,
+          "label": "periodic_1209k f3348 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/7/activation_alignment/test_spearman",
+          "value": 0.8551391136272356,
+          "label": "periodic_1209k f6208 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/8/activation_alignment/test_spearman",
+          "value": 0.48590353939120506,
+          "label": "periodic_1209k f5160 k64_seed0"
+        },
+        {
+          "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+          "pointer": "/records/9/activation_alignment/test_spearman",
+          "value": 0.8615730505224053,
+          "label": "periodic_1209k f3055 k64_seed0"
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "feature_stability",
+      "protocol": "sae_stability"
+    },
+    {
+      "slide": 10,
+      "title": "Controlled feature effects",
+      "claims": [
+        "Every feature lowers its nominated logit on average; control comparisons test dependence of frozen chemical readouts.",
+        "Only the40full-dose feature-versus-control contrasts use Holm correction; secondary CIs remain descriptive.",
+        "Requested norms match exactly; bf16 realized norms differ slightly."
+      ],
+      "endpoints": [
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/0/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.00341543328795524,
+            "ci95": [
+              -0.004865590202552998,
+              -0.002173217935857491
+            ]
+          },
+          "label": "parent_1190k f2164, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/0/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.004295394945074806,
+            "ci95": [
+              -0.005798146843032256,
+              -0.0029270992925982415
+            ]
+          },
+          "label": "parent_1190k f2164, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/1/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.0042657642291790854,
+            "ci95": [
+              -0.005510764283250555,
+              -0.003128059066739293
+            ]
+          },
+          "label": "parent_1190k f7370, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/1/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.008686418211558092,
+            "ci95": [
+              -0.010857442323276694,
+              -0.0066859545223148095
+            ]
+          },
+          "label": "parent_1190k f7370, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/2/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.04275246856953652,
+            "ci95": [
+              -0.04871020911533228,
+              -0.037458589041337594
+            ]
+          },
+          "label": "parent_1190k f3678, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/2/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.03627856590749917,
+            "ci95": [
+              -0.04145428560147292,
+              -0.031688131559333976
+            ]
+          },
+          "label": "parent_1190k f3678, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/3/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.0034881747148271343,
+            "ci95": [
+              -0.004607461694771093,
+              -0.0024237143005242036
+            ]
+          },
+          "label": "parent_1190k f2182, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/3/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.0011854028574210425,
+            "ci95": [
+              -0.0024320254271212077,
+              3.339771786462272e-05
+            ]
+          },
+          "label": "parent_1190k f2182, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/4/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.03829890148335837,
+            "ci95": [
+              -0.04628660749358459,
+              -0.03091093210941835
+            ]
+          },
+          "label": "parent_1190k f738, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/4/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.053412590699735994,
+            "ci95": [
+              -0.0636428549156638,
+              -0.043714485224063564
+            ]
+          },
+          "label": "parent_1190k f738, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/5/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.010861887104207806,
+            "ci95": [
+              -0.013238725274277384,
+              -0.008550721030769638
+            ]
+          },
+          "label": "parent_1190k f4407, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/5/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.02019005040832178,
+            "ci95": [
+              -0.02403914722632788,
+              -0.016189044547718377
+            ]
+          },
+          "label": "parent_1190k f4407, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/6/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.009357289322603421,
+            "ci95": [
+              -0.011035163937655548,
+              -0.007728794021052937
+            ]
+          },
+          "label": "parent_1190k f6482, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/6/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.005943236140107423,
+            "ci95": [
+              -0.007137308892257953,
+              -0.004868414433652404
+            ]
+          },
+          "label": "parent_1190k f6482, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/7/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.004952955125190786,
+            "ci95": [
+              -0.006749281479793963,
+              -0.0033588657773786232
+            ]
+          },
+          "label": "parent_1190k f2652, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/7/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.005211587216763292,
+            "ci95": [
+              -0.007123746979353499,
+              -0.0035429961861154877
+            ]
+          },
+          "label": "parent_1190k f2652, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/8/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.002073743612224158,
+            "ci95": [
+              -0.003907643439076005,
+              -0.00027249456191687357
+            ]
+          },
+          "label": "parent_1190k f1347, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/8/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.007329010873945661,
+            "ci95": [
+              -0.009863296388599953,
+              -0.005022587041942944
+            ]
+          },
+          "label": "parent_1190k f1347, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/9/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.005093425879749702,
+            "ci95": [
+              -0.006781303305312276,
+              -0.003545208257492046
+            ]
+          },
+          "label": "parent_1190k f2360, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/features/9/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.0035255190947888564,
+            "ci95": [
+              -0.004914147193206492,
+              -0.0023559779031832795
+            ]
+          },
+          "label": "parent_1190k f2360, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/0/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.010371570932420584,
+            "ci95": [
+              -0.01291788817011365,
+              -0.00801932036165074
+            ]
+          },
+          "label": "periodic_1209k f6122, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/0/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.018750595213532513,
+            "ci95": [
+              -0.021728217759349883,
+              -0.015936502667284472
+            ]
+          },
+          "label": "periodic_1209k f6122, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/1/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.007264882515604164,
+            "ci95": [
+              -0.008960461237218923,
+              -0.005693122755284702
+            ]
+          },
+          "label": "periodic_1209k f5287, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/1/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.007389544311384575,
+            "ci95": [
+              -0.009148755803175842,
+              -0.005830467633487993
+            ]
+          },
+          "label": "periodic_1209k f5287, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/2/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.033319703206264734,
+            "ci95": [
+              -0.03923833206921097,
+              -0.027801415440853815
+            ]
+          },
+          "label": "periodic_1209k f1823, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/2/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.02722744806487755,
+            "ci95": [
+              -0.032086305328933425,
+              -0.02287050850569966
+            ]
+          },
+          "label": "periodic_1209k f1823, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/3/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.0028779684240968616,
+            "ci95": [
+              -0.00368071164699965,
+              -0.0021273838043271136
+            ]
+          },
+          "label": "periodic_1209k f1372, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/3/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.00683830011257669,
+            "ci95": [
+              -0.008441230228406016,
+              -0.0053178421704312105
+            ]
+          },
+          "label": "periodic_1209k f1372, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/4/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.008626170386075195,
+            "ci95": [
+              -0.010953896922668108,
+              -0.006430090645577979
+            ]
+          },
+          "label": "periodic_1209k f7363, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/4/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.007559030590831148,
+            "ci95": [
+              -0.010283099135995141,
+              -0.005212655917057418
+            ]
+          },
+          "label": "periodic_1209k f7363, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/5/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.024561166855467803,
+            "ci95": [
+              -0.032428236513775716,
+              -0.017109812760099884
+            ]
+          },
+          "label": "periodic_1209k f1707, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/5/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.031388076956621554,
+            "ci95": [
+              -0.03962670004590716,
+              -0.023802197005231094
+            ]
+          },
+          "label": "periodic_1209k f1707, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/6/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.011419311982535868,
+            "ci95": [
+              -0.014422457609180128,
+              -0.008670075437203198
+            ]
+          },
+          "label": "periodic_1209k f3348, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/6/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.019965287915814162,
+            "ci95": [
+              -0.024719858115198196,
+              -0.015600397611463743
+            ]
+          },
+          "label": "periodic_1209k f3348, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/7/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.005636531989997219,
+            "ci95": [
+              -0.006813954868403024,
+              -0.004342503178486369
+            ]
+          },
+          "label": "periodic_1209k f6208, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/7/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.003216307147643722,
+            "ci95": [
+              -0.003982815235925349,
+              -0.0024478387726351992
+            ]
+          },
+          "label": "periodic_1209k f6208, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/8/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.018270147547809763,
+            "ci95": [
+              -0.02328585936135522,
+              -0.013952592586686775
+            ]
+          },
+          "label": "periodic_1209k f5160, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/8/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.01060724778350656,
+            "ci95": [
+              -0.013438307234006668,
+              -0.007924063793719453
+            ]
+          },
+          "label": "periodic_1209k f5160, feature minus random_unit_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/9/doses/1.0/feature_minus_control/matched_feature_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.011369807874264861,
+            "ci95": [
+              -0.013645649940099258,
+              -0.00922279257976395
+            ]
+          },
+          "label": "periodic_1209k f3055, feature minus matched_feature_direction"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/9/doses/1.0/feature_minus_control/random_unit_direction/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.010662650291124004,
+            "ci95": [
+              -0.012857738773542833,
+              -0.008574645604934022
+            ]
+          },
+          "label": "periodic_1209k f3055, feature minus random_unit_direction"
+        }
+      ],
+      "evidence": [
+        "sae_causal_analysis/sae_causal_analysis.json"
+      ],
+      "figure_stem": "sae_causal",
+      "protocol": "sae_causal",
+      "derived_endpoints": [
+        {
+          "label": "Full-dose primary family",
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/primary_tests",
+          "operation": "Count tests; count holm_adjusted_p < 0.05",
+          "value": {
+            "total": 40,
+            "holm_significant_0p05": 38
+          }
+        }
+      ]
+    },
+    {
+      "slide": 11,
+      "title": "Causal influence is not chemical selectivity",
+      "claims": [
+        "Latest nitrile3348 is a near-chance molecular association but still influences the nitrile logit.",
+        "Full SAE reconstruction causes downstream readout damage; higher reconstruction fidelity does not ensure chemical task preservation."
+      ],
+      "endpoints": [
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/6/test_association/auroc",
+          "value": 0.49581625683060115
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/features/6/doses/1.0/variants/feature/cohorts/all/metrics/target_logit_change",
+          "value": {
+            "mean": -0.03479367916285506,
+            "ci95": [
+              -0.04198561890940861,
+              -0.028434046890758215
+            ]
+          }
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/0/reconstruction/all/metrics/balanced_bce_change",
+          "value": {
+            "mean": 0.01144520685772724,
+            "ci95": [
+              0.005125994237134194,
+              0.018068020284629133
+            ]
+          },
+          "label": "parent_1190k all-supported balancedBCE reconstruction change"
+        },
+        {
+          "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+          "pointer": "/arms/1/reconstruction/all/metrics/balanced_bce_change",
+          "value": {
+            "mean": 0.013123166670823121,
+            "ci95": [
+              0.007273944894649604,
+              0.019690308479277722
+            ]
+          },
+          "label": "periodic_1209k all-supported balancedBCE reconstruction change"
+        }
+      ],
+      "evidence": [],
+      "protocol": "sae_causal"
+    },
+    {
+      "slide": 12,
+      "title": "Measured halide positive and false positive",
+      "claims": [
+        "Post-confirmation illustrative extremes selected by highest test activation within positive/negative label groups.",
+        "Atoms denote molecularSMARTSlabels; physical-token activation does not assign peaks to those atoms."
+      ],
+      "endpoints": [
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/test_metrics",
+          "value": {
+            "positive": 320,
+            "negative": 704,
+            "auroc": 0.6750776811079546,
+            "average_precision": 0.5127382979383097,
+            "threshold": 0.7728852331638336,
+            "comparison_operator": ">",
+            "precision": 0.5014005602240896,
+            "recall": 0.559375,
+            "f1": 0.5288035450516987,
+            "predicted_positive": 357
+          }
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/matched_donor_ordering",
+          "value": {
+            "directed_pairs": 396,
+            "unique_donors": 273,
+            "positive_anchors": 167,
+            "negative_anchors": 229,
+            "accuracy": 0.648989898989899,
+            "balanced_anchor_accuracy": 0.651517924848992,
+            "ties": 132,
+            "interpretation": "Descriptive strict nuisance-matched ordering; shared donors, not independent molecular counterfactuals"
+          }
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/panel_row",
+          "value": 6077
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/source_row",
+          "value": 144922
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/identifier",
+          "value": "MassSpecGymID0213243"
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/molecular_concept_present",
+          "value": true
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/maximum_activation",
+          "value": 10.717755317687988
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/0/above_frozen_threshold",
+          "value": true
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/panel_row",
+          "value": 5389
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/source_row",
+          "value": 159064
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/identifier",
+          "value": "MassSpecGymID0228928"
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/molecular_concept_present",
+          "value": false
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/maximum_activation",
+          "value": 9.987166404724121
+        },
+        {
+          "artifact": "feature_atlas/selection.json",
+          "pointer": "/cards/4/examples/1/above_frozen_threshold",
+          "value": true
+        }
+      ],
+      "evidence": [
+        "feature_atlas/selection.json"
+      ],
+      "figure_stem": "halide_case",
+      "protocol": "illustrative_cases"
+    },
+    {
+      "slide": 13,
+      "title": "Chemical neighbors under nuisance controls",
+      "claims": [
+        "Full-bank SAE neighbors have lower chemical similarity in latest.",
+        "Restricted matching leaves472testqueries; latest-parent Morgan interval crosses zero. Observational coverage-limited control."
+      ],
+      "endpoints": [
+        {
+          "artifact": "sae_comparison/comparison.json",
+          "pointer": "/geometry_models/parent_1190k/representations/sae/metrics/morgan_tanimoto",
+          "value": {
+            "mean": 0.17592694933670439,
+            "ci95": [
+              0.17088286842245792,
+              0.1808996109036604
+            ],
+            "eligible_test_molecules": 1024
+          }
+        },
+        {
+          "artifact": "sae_comparison/comparison.json",
+          "pointer": "/geometry_models/periodic_1209k/representations/sae/metrics/morgan_tanimoto",
+          "value": {
+            "mean": 0.16706526606019712,
+            "ci95": [
+              0.16208198405480168,
+              0.17242727415727166
+            ],
+            "eligible_test_molecules": 1024
+          }
+        },
+        {
+          "artifact": "sae_comparison/comparison.json",
+          "pointer": "/geometry_checkpoint_contrasts/sae/morgan_tanimoto",
+          "value": {
+            "paired_test_molecules": 1024,
+            "difference": {
+              "estimate": -0.008861683276507243,
+              "ci95": [
+                -0.01274756698791345,
+                -0.004870531376811901
+              ],
+              "valid_bootstrap_replicates": 1000,
+              "undefined_bootstrap_replicates": 0,
+              "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+            }
+          }
+        },
+        {
+          "artifact": "sae_comparison/matched_geometry.json",
+          "pointer": "/checkpoint_contrasts/sae/morgan_tanimoto",
+          "value": {
+            "estimate": -0.0016250695889097869,
+            "ci95": [
+              -0.005091537223682493,
+              0.001691798638982583
+            ],
+            "valid_bootstrap_replicates": 1000,
+            "undefined_bootstrap_replicates": 0,
+            "interval_type": "paired molecule percentile bootstrap; conditional on defined fixed-target statistic"
+          }
+        },
+        {
+          "artifact": "sae_comparison/matched_geometry.json",
+          "pointer": "/support",
+          "value": {
+            "test_molecules": 1024,
+            "no_candidate": 404,
+            "one_candidate_only": 148,
+            "at_least_two_candidates": 472,
+            "common_nonzero_representation_molecules": 472,
+            "candidate_count_quantiles_supported": [
+              2.0,
+              3.0,
+              5.0,
+              9.0,
+              25.0
+            ]
+          }
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "chemical_neighbors",
+      "protocol": "chemical_geometry"
+    },
+    {
+      "slide": 14,
+      "title": "Component and attention-head necessity",
+      "claims": [
+        "Screen all branches on256validationmolecules; freeze top3layers per branch before testing512molecules.",
+        "Ablate all8heads in each selectedattentionlayer; largest observed test component is descriptive, not a newly validated discovery.",
+        "The branch panel uses the validation-first selected layer; the head panels show all24 tested heads. Block numbers1\u201325 and head IDs0\u20137."
+      ],
+      "endpoints": [
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/parent_1190k/largest_observed/attention",
+          "value": {
+            "variant": "attention_block23_scale0",
+            "delta": 0.05160553217767448,
+            "ci95": [
+              0.044397387915030055,
+              0.05857905694967236
+            ],
+            "delta_auroc": -0.004451765111939565
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/parent_1190k/largest_observed/mlp",
+          "value": {
+            "variant": "mlp_block25_scale0",
+            "delta": 0.02344791473288265,
+            "ci95": [
+              0.01113840322968026,
+              0.03565948457786902
+            ],
+            "delta_auroc": -0.0021216016905728496
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/parent_1190k/largest_observed/metadata",
+          "value": {
+            "variant": "metadata_block23_scale0",
+            "delta": 0.010982385936980501,
+            "ci95": [
+              0.008225530237340423,
+              0.013977396000035903
+            ],
+            "delta_auroc": -0.0017540717694037866
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/parent_1190k/largest_observed/head",
+          "value": {
+            "variant": "head_block23_head6_scale0",
+            "delta": 0.03849399311927455,
+            "ci95": [
+              0.032579360463406086,
+              0.0443412170372999
+            ],
+            "delta_auroc": -0.004682211597589081
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/periodic_1209k/largest_observed/attention",
+          "value": {
+            "variant": "attention_block1_scale0",
+            "delta": 0.038348224192466515,
+            "ci95": [
+              0.024167997129530855,
+              0.05106425140373479
+            ],
+            "delta_auroc": -0.03483421692645017
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/periodic_1209k/largest_observed/mlp",
+          "value": {
+            "variant": "mlp_block18_scale0",
+            "delta": 0.020936813649462906,
+            "ci95": [
+              0.014335494334093148,
+              0.02806325680887914
+            ],
+            "delta_auroc": -0.011322222971204554
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/periodic_1209k/largest_observed/metadata",
+          "value": {
+            "variant": "metadata_block18_scale0",
+            "delta": 0.0070368088031968114,
+            "ci95": [
+              0.004361388837753005,
+              0.009775665147483268
+            ],
+            "delta_auroc": -0.0020166033496932245
+          }
+        },
+        {
+          "artifact": "component_analysis/summary.json",
+          "pointer": "/arms/periodic_1209k/largest_observed/head",
+          "value": {
+            "variant": "head_block21_head6_scale0",
+            "delta": 0.0036925290642417946,
+            "ci95": [
+              0.002411832915528607,
+              0.005138455818450461
+            ],
+            "delta_auroc": -0.0010265224394371275
+          }
+        }
+      ],
+      "evidence": [
+        "component_analysis/summary.json"
+      ],
+      "figure_stem": "component_heads",
+      "protocol": "components"
+    },
+    {
+      "slide": 15,
+      "title": "Activation rescue localizes perturbation transmission",
+      "claims": [
+        "Selectedpeak clean-state restoration reduces logiterror more than samecount randomslot restoration.",
+        "Full-state restoration is exact at all26rawdepths; weak balanced-loss corruption damage limits chemical-loss rescue inference."
+      ],
+      "endpoints": [
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/parent_1190k/corruption_logit_mse",
+          "value": 0.2587520868091881
+        },
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/parent_1190k/corruption_balanced_bce_damage",
+          "value": {
+            "mean": 0.0019340901057019251,
+            "ci95": [
+              -0.006263222605821054,
+              0.009638365258043697
+            ]
+          }
+        },
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/parent_1190k/depths/19",
+          "value": {
+            "depth": 19,
+            "selected_bce_recovery": {
+              "mean": 0.0016918344778207954,
+              "ci95": [
+                -0.003979975482126993,
+                0.007022547121023085
+              ]
+            },
+            "random_bce_recovery": {
+              "mean": 0.0013004908996656925,
+              "ci95": [
+                -7.2336395924596e-05,
+                0.0027641503905355288
+              ]
+            },
+            "selected_minus_random_bce_recovery": {
+              "mean": 0.0003913435781551038,
+              "ci95": [
+                -0.0052984455507129125,
+                0.005762689034400455
+              ]
+            },
+            "selected_logit_mse": {
+              "mean": 0.07007016883176573,
+              "ci95": [
+                0.05607567926138368,
+                0.08891665417770693
+              ]
+            },
+            "random_logit_mse": {
+              "mean": 0.2286364573233323,
+              "ci95": [
+                0.20261151351368148,
+                0.25699737408838524
+              ]
+            },
+            "selected_minus_random_mse_reduction": {
+              "mean": 0.15856628849156654,
+              "ci95": [
+                0.13785149021288087,
+                0.18308131388301274
+              ]
+            },
+            "full_restore_max_abs_error": 0.0
+          }
+        },
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/periodic_1209k/corruption_logit_mse",
+          "value": 0.28117043591862156
+        },
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/periodic_1209k/corruption_balanced_bce_damage",
+          "value": {
+            "mean": 0.004434943706408201,
+            "ci95": [
+              -0.0033869696856501045,
+              0.012130301841698743
+            ]
+          }
+        },
+        {
+          "artifact": "patching_analysis/results.json",
+          "pointer": "/arms/periodic_1209k/depths/19",
+          "value": {
+            "depth": 19,
+            "selected_bce_recovery": {
+              "mean": 0.001092629298813247,
+              "ci95": [
+                -0.005185055662428707,
+                0.006952240679940624
+              ]
+            },
+            "random_bce_recovery": {
+              "mean": 0.0018739989171336529,
+              "ci95": [
+                0.0005703172264513449,
+                0.0031930345778502247
+              ]
+            },
+            "selected_minus_random_bce_recovery": {
+              "mean": -0.0007813696183204054,
+              "ci95": [
+                -0.007292317570522969,
+                0.005249868019319067
+              ]
+            },
+            "selected_logit_mse": {
+              "mean": 0.06671769359861476,
+              "ci95": [
+                0.05957653593557552,
+                0.07464945290700604
+              ]
+            },
+            "random_logit_mse": {
+              "mean": 0.25630667936220297,
+              "ci95": [
+                0.23392380803884366,
+                0.2801432275775456
+              ]
+            },
+            "selected_minus_random_mse_reduction": {
+              "mean": 0.18958898576358824,
+              "ci95": [
+                0.16991998484477264,
+                0.20987342456064767
+              ]
+            },
+            "full_restore_max_abs_error": 0.0
+          }
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "activation_rescue",
+      "protocol": "activation_rescue"
+    },
+    {
+      "slide": 16,
+      "title": "Input robustness",
+      "claims": [
+        "Latest incurs less peak-removal damage, but its absolute chemicalBCE remains worse before/after removal.",
+        "Eligible paired cohorts only; ordinaryBCE uses177train-active outputs, unlike balanced component/SAE endpoints."
+      ],
+      "endpoints": [
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/baseline/bce",
+          "value": 0.4437327485442193
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/corruption_delta_bce/remove_top20",
+          "value": {
+            "n": 1024,
+            "mean": 0.06267602825529497,
+            "median": 0.05191497444942973,
+            "ci95": [
+              0.05897034666409258,
+              0.06650499568935747
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/corruption_delta_bce/remove_random20",
+          "value": {
+            "n": 1024,
+            "mean": 0.028773348239950813,
+            "median": 0.02393718162674589,
+            "ci95": [
+              0.026204063701510395,
+              0.03132959955642036
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/corruption_delta_bce/permute_intensity",
+          "value": {
+            "n": 1024,
+            "mean": 0.04841072209370872,
+            "median": 0.04018561918446065,
+            "ci95": [
+              0.04418441846591789,
+              0.05252988231559812
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/corruption_delta_bce/mz_jitter_0p01da",
+          "value": {
+            "n": 1024,
+            "mean": 0.07601872281814405,
+            "median": 0.05346644371121506,
+            "ci95": [
+              0.07005184161272399,
+              0.08210331605394908
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/baseline/bce",
+          "value": 0.47851865094872537
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/corruption_delta_bce/remove_top20",
+          "value": {
+            "n": 1024,
+            "mean": 0.03591860436015837,
+            "median": 0.02839367783782165,
+            "ci95": [
+              0.03295866971931273,
+              0.03921391364934932
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/corruption_delta_bce/remove_random20",
+          "value": {
+            "n": 1024,
+            "mean": 0.013199192689554079,
+            "median": 0.009860477145947939,
+            "ci95": [
+              0.01118972188376593,
+              0.015191064574332705
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/corruption_delta_bce/permute_intensity",
+          "value": {
+            "n": 1024,
+            "mean": 0.041278526885893896,
+            "median": 0.03167110041044055,
+            "ci95": [
+              0.03694664329634451,
+              0.04590606271760565
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/corruption_delta_bce/mz_jitter_0p01da",
+          "value": {
+            "n": 1024,
+            "mean": 0.08340021078970153,
+            "median": 0.04874169499475585,
+            "ci95": [
+              0.07664625374097232,
+              0.09052046937113181
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/paired_latest_minus_parent/remove_top20",
+          "value": {
+            "n": 1024,
+            "mean": -0.026757423895136613,
+            "median": -0.02180876723392264,
+            "ci95": [
+              -0.03032020391049295,
+              -0.023355291395686494
+            ]
+          }
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "input_robustness",
+      "protocol": "input_effects"
+    },
+    {
+      "slide": 17,
+      "title": "Observed metadata path intervention",
+      "claims": [
+        "Same physicalinput,observedCEold/new; raw25cross-patching separates block-conditioned state from finalnorm/affine metadata.",
+        "Four native forward graphs with exactdiagonal selfpatches; no zero-valueOOD substitution needed for thisfactorial."
+      ],
+      "endpoints": [
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/eligible_ce_molecules",
+          "value": 689
+        }
+      ],
+      "evidence": [
+        "parent_1190k/causal/input_metadata_factorial/manifest.json",
+        "periodic_1209k/causal/input_metadata_factorial/manifest.json"
+      ],
+      "figure_stem": "metadata_paths",
+      "protocol": "metadata_factorial"
+    },
+    {
+      "slide": 18,
+      "title": "Metadata effects and real repeats",
+      "claims": [
+        "Latest is more sensitive to observedCE and has more chemical-score drift across real same-molecule repeats.",
+        "Nearzero final-only meanBCE can coexist with nonzero individual scorechanges; nonlinearBCE interaction is not a molecular interaction."
+      ],
+      "endpoints": [
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/metadata_path_delta_bce",
+          "value": {
+            "final_affine_only": {
+              "n": 689,
+              "mean": 4.802884096125882e-05,
+              "median": -2.7208531028795465e-05,
+              "ci95": [
+                -0.0002736646951833618,
+                0.0003629752294187994
+              ]
+            },
+            "blocks_only": {
+              "n": 689,
+              "mean": 0.006508786694589705,
+              "median": 0.005102399031310179,
+              "ci95": [
+                0.0037852590722126664,
+                0.009257958987635642
+              ]
+            },
+            "both_paths": {
+              "n": 689,
+              "mean": 0.006445429889235704,
+              "median": 0.004856945347069384,
+              "ci95": [
+                0.003753796420868733,
+                0.009105761350650372
+              ]
+            }
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/metadata_bce_interaction",
+          "value": {
+            "n": 689,
+            "mean": -0.00011138564631525902,
+            "median": -1.7136569431201244e-05,
+            "ci95": [
+              -0.00019172921598631953,
+              -3.1048833386892534e-05
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/parent_1190k/observed_repeat/observed_repeat_own_metadata",
+          "value": {
+            "delta_bce": {
+              "n": 689,
+              "mean": -0.008407622216435871,
+              "median": -0.006458914900482864,
+              "ci95": [
+                -0.014410102622393933,
+                -0.002847660978151404
+              ]
+            },
+            "readout_logit_cosine": {
+              "n": 689,
+              "mean": 0.9074625008968177,
+              "median": 0.9421056962484162,
+              "ci95": [
+                0.9002608056545505,
+                0.9144389415781966
+              ]
+            },
+            "probability_l1_drift": {
+              "n": 689,
+              "mean": 0.10073963281225394,
+              "median": 0.08906050081898235,
+              "ci95": [
+                0.09719341500966441,
+                0.10455003178905883
+              ]
+            }
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/metadata_path_delta_bce",
+          "value": {
+            "final_affine_only": {
+              "n": 689,
+              "mean": -5.6456531667020254e-05,
+              "median": -0.0003001244605772837,
+              "ci95": [
+                -0.0007475191375510882,
+                0.0006987766184501321
+              ]
+            },
+            "blocks_only": {
+              "n": 689,
+              "mean": 0.008522950960592215,
+              "median": 0.005434090288111697,
+              "ci95": [
+                0.004640630462862608,
+                0.012571979727190886
+              ]
+            },
+            "both_paths": {
+              "n": 689,
+              "mean": 0.010931102798825462,
+              "median": 0.007626247732781378,
+              "ci95": [
+                0.007058873351729566,
+                0.014941458707816513
+              ]
+            }
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/metadata_bce_interaction",
+          "value": {
+            "n": 689,
+            "mean": 0.0024646083699002706,
+            "median": 0.0012637282754711318,
+            "ci95": [
+              0.0020746183886700548,
+              0.0028601279813381636
+            ]
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/checkpoints/periodic_1209k/observed_repeat/observed_repeat_own_metadata",
+          "value": {
+            "delta_bce": {
+              "n": 689,
+              "mean": -0.0030481512929687324,
+              "median": -0.003856293712577299,
+              "ci95": [
+                -0.00891001301464153,
+                0.0028404132080324523
+              ]
+            },
+            "readout_logit_cosine": {
+              "n": 689,
+              "mean": 0.8929161014579338,
+              "median": 0.9269971186196057,
+              "ci95": [
+                0.8852228737284641,
+                0.9003472316207934
+              ]
+            },
+            "probability_l1_drift": {
+              "n": 689,
+              "mean": 0.10931983807902584,
+              "median": 0.09964203107183761,
+              "ci95": [
+                0.10569665521154492,
+                0.11298115655231733
+              ]
+            }
+          }
+        },
+        {
+          "artifact": "input_effects_analysis/summary.json",
+          "pointer": "/paired_latest_minus_parent/observed_ce_metadata",
+          "value": {
+            "n": 689,
+            "mean": 0.00448567254652317,
+            "median": -5.092303141789869e-05,
+            "ci95": [
+              0.000569138229346897,
+              0.008629747003101792
+            ]
+          }
+        }
+      ],
+      "evidence": [],
+      "figure_stem": "metadata_effects",
+      "protocol": "metadata_factorial"
+    },
+    {
+      "slide": 19,
+      "title": "Evidence synthesis",
+      "claims": [
+        "Useful token-level chemical signals and replicated SAE associations exist.",
+        "Compressibility improves; token-attention chemicalreadouts favorparent; perturbationrobustness/invariancetradeoff is mixed.",
+        "No evidence supports an overallchemical improvement or complete identifiable chemical circuit."
+      ],
+      "endpoints": [],
+      "evidence": [
+        "readout_comparison/comparison.json",
+        "sae_comparison/comparison.json",
+        "sae_causal_analysis/sae_causal_analysis.json",
+        "input_effects_analysis/summary.json"
+      ],
+      "protocol": "interpretation"
+    },
+    {
+      "slide": 20,
+      "title": "Native numerical contract",
+      "claims": [
+        "Canonical batch8 fulltrace/native pilots are bitwise equal; interventionidentitycontrols exact.",
+        "Torch shares exact checkpoint tensors but not the same numerical function; oldbatch16/prunedgraph caches excluded."
+      ],
+      "endpoints": [
+        {
+          "artifact": "parent_1190k/pilot.json",
+          "pointer": "/native_vs_instrumented",
+          "value": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "rms": 0.0,
+            "median_token_cosine": 1.0,
+            "minimum_token_cosine": 0.9999998807907104,
+            "bitwise_equal": true,
+            "finite": true
+          }
+        },
+        {
+          "artifact": "parent_1190k/pilot.json",
+          "pointer": "/export_weights",
+          "value": {
+            "count": 322,
+            "exactly_equal": true,
+            "differences": []
+          }
+        },
+        {
+          "artifact": "parent_1190k/pilot.json",
+          "pointer": "/torch_vs_native",
+          "value": {
+            "relative_l2": 0.03971664980053902,
+            "max_absolute": 11.584503173828125,
+            "rms": 0.055327627807855606,
+            "median_token_cosine": 0.9999623894691467,
+            "minimum_token_cosine": 0.9436905384063721,
+            "bitwise_equal": false,
+            "finite": true
+          }
+        },
+        {
+          "artifact": "parent_1190k/extraction.json",
+          "pointer": "/extraction_vs_native_pilot",
+          "value": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "rms": 0.0,
+            "median_token_cosine": 1.0,
+            "minimum_token_cosine": 0.9999998807907104,
+            "bitwise_equal": true,
+            "finite": true
+          }
+        },
+        {
+          "artifact": "periodic_1209k/pilot.json",
+          "pointer": "/native_vs_instrumented",
+          "value": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "rms": 0.0,
+            "median_token_cosine": 1.0,
+            "minimum_token_cosine": 0.9999998807907104,
+            "bitwise_equal": true,
+            "finite": true
+          }
+        },
+        {
+          "artifact": "periodic_1209k/pilot.json",
+          "pointer": "/export_weights",
+          "value": {
+            "count": 322,
+            "exactly_equal": true,
+            "differences": []
+          }
+        },
+        {
+          "artifact": "periodic_1209k/pilot.json",
+          "pointer": "/torch_vs_native",
+          "value": {
+            "relative_l2": 0.043740998953580856,
+            "max_absolute": 5.29055118560791,
+            "rms": 0.037019677460193634,
+            "median_token_cosine": 0.999923825263977,
+            "minimum_token_cosine": 0.7799943685531616,
+            "bitwise_equal": false,
+            "finite": true
+          }
+        },
+        {
+          "artifact": "periodic_1209k/extraction.json",
+          "pointer": "/extraction_vs_native_pilot",
+          "value": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "rms": 0.0,
+            "median_token_cosine": 1.0,
+            "minimum_token_cosine": 0.9999998807907104,
+            "bitwise_equal": true,
+            "finite": true
+          }
+        }
+      ],
+      "evidence": [
+        "completion_audit.json"
+      ],
+      "protocol": "native_numerics"
+    },
+    {
+      "slide": 21,
+      "title": "Limits and next steps",
+      "claims": [
+        "Two fixed checkpoints and priorbenchmark exposure; unknown pretrainingoverlap.",
+        "Readout dependence is not chemical groundtruth; no positive steering/sufficiency or head-to-feature mediation.",
+        "Rareweakloss cases and incomplete fragment labels limit interpretation; future tests are proposals, not completed results."
+      ],
+      "endpoints": [],
+      "evidence": [
+        "study_protocol.json",
+        "completion_audit.json"
+      ],
+      "protocol": "interpretation"
+    },
+    {
+      "slide": 22,
+      "title": "Sources and reproduction",
+      "claims": [
+        "EvidenceJSONs,source archive,exactexecutioncontracts and nativecache provenance accompany figures.",
+        "Sourcearchive is the final snapshot; per-experiment manifests pin actualexecution code."
+      ],
+      "endpoints": [
+        {
+          "artifact": "reproduction_manifest.json",
+          "pointer": "/archive_sha256",
+          "value": "ed2aa082b8ee7635ee9246b5c5a8f8fcf46b3d3b6737c02a9f0ff278740b25f2"
+        }
+      ],
+      "evidence": [
+        "reproduction_manifest.json",
+        "completion_audit.json"
+      ],
+      "protocol": "reproducibility"
+    }
+  ],
+  "sources": [
+    {
+      "artifact": "completion_audit.json",
+      "sha256": "260b045af4a7fba2831bad1397b1eac6eb9d92b3df438634262f647d8b6002c5"
+    },
+    {
+      "artifact": "component_analysis/summary.json",
+      "sha256": "f1506c382c5e502bfe0b89ed173364512b926e1aa3da2f7cc3dbf26097f5a0f2"
+    },
+    {
+      "artifact": "endpoint_selection.json",
+      "sha256": "c4c19774fbf13a7ca89337d4c8575a8f93680a7498bb53fdb5a8829cc1704549"
+    },
+    {
+      "artifact": "feature_atlas/selection.json",
+      "sha256": "ed01ef4711e439462403c67a766ca9add4693bd25ad01d0ff9dfccace7232b78"
+    },
+    {
+      "artifact": "input_effects_analysis/summary.json",
+      "sha256": "b77027b31d4b244d401b62a97c9e82a9a92a752a09eebbb7184b993bbca7ed7c"
+    },
+    {
+      "artifact": "panel/identity_audit.json",
+      "sha256": "e0b5662b637042a69a36dc10c337f6ff855d0fbfe5dd99130e1ce862fca02971"
+    },
+    {
+      "artifact": "panel/manifest.json",
+      "sha256": "0bb4fced4403bda0dc1639f0e46d6670cc3092de3bbd421d9c24d0d11912378c"
+    },
+    {
+      "artifact": "panel/matching_audit.json",
+      "sha256": "384a6bbc8393104f9cd7c6421aaedead11a6bcb875e2a288477eaf3df2d2a7d5"
+    },
+    {
+      "artifact": "parent_1190k/atlas.json",
+      "sha256": "b166ab74a49482d4b5b705dce3ca6c08a827f8ea1d04bc593f46fe45a048d3c9"
+    },
+    {
+      "artifact": "parent_1190k/causal/input_metadata_factorial/manifest.json",
+      "sha256": "e7f3903dcda1a74d6ec04d5f2a6964ff2b721e586ddfee721a38821cc1c7f521"
+    },
+    {
+      "artifact": "parent_1190k/extraction.json",
+      "sha256": "18b96596e7d2f16184b03bfe4408c378aba9fb131e7a48e58f65b873266da0fc"
+    },
+    {
+      "artifact": "parent_1190k/pilot.json",
+      "sha256": "39e9303e975f7191ec550e6bd365baf3d9addff0e9a2b1655516cb0c87e8d02d"
+    },
+    {
+      "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+      "sha256": "02f9762825fac93b57c14a2243ea1120f2c9a462a281e4c3464750a49f5f6acf"
+    },
+    {
+      "artifact": "parent_1190k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+      "sha256": "9a0be01c73245999c95cfbab085c6e9cea47f44f9cc9b835cbe48b6bebed2a44"
+    },
+    {
+      "artifact": "parent_config.json",
+      "sha256": "f27c3f0082a3c916fee8c39e18b9dd1adf629ca9c83cb793f9c56512e248e290"
+    },
+    {
+      "artifact": "patching_analysis/results.json",
+      "sha256": "6176819915ba68dd0c81fff8fb8867a7e9264b7ca4c160fdf3ba17fc799dd830"
+    },
+    {
+      "artifact": "periodic_1209k/atlas.json",
+      "sha256": "0f5de785a19cae8cc5a309cebf32f311614c4c28fde25c5001e8fa398162062b"
+    },
+    {
+      "artifact": "periodic_1209k/causal/input_metadata_factorial/manifest.json",
+      "sha256": "95944b4b616c1d204c2b9d8ac13a82b96e8ab75e22c604cbfc8e4d2c2e275b87"
+    },
+    {
+      "artifact": "periodic_1209k/extraction.json",
+      "sha256": "6309b33f47f3024de3a40c76b18fa0b914bc6143ad31de401938a20c7bdc581f"
+    },
+    {
+      "artifact": "periodic_1209k/pilot.json",
+      "sha256": "0ac63f0fa897fd314347c84d0b12b7c47f8ed4d135028c827e714d98d6fc2a87"
+    },
+    {
+      "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k32_seed1_test_confirmation.json",
+      "sha256": "a174c140ddd8b5b57e8fb87b6372695d6ff6c652b7c87d209836d61d5c53561e"
+    },
+    {
+      "artifact": "periodic_1209k/sae/depth19/k32/seed0/stability/k64_seed0_test_confirmation.json",
+      "sha256": "9b7207bc8637db80652536cb012ee3d7e522837ec19f0a43900a276afd0dbd93"
+    },
+    {
+      "artifact": "periodic_config.json",
+      "sha256": "63377d6e55ddf3dba7cd4ea53bae2781b1dd22dd6e08bb82a60c4c0fca9228f8"
+    },
+    {
+      "artifact": "readout_comparison/comparison.json",
+      "sha256": "3a96e6c294f46ed2184ac2df31b910f9af74e8f0bca6afb16f9e6379bb5dfd35"
+    },
+    {
+      "artifact": "reproduction_manifest.json",
+      "sha256": "948b858393e142c60e60ff915a7e1b29378838cda6f7cb59d05900c4f3aae48e"
+    },
+    {
+      "artifact": "sae_causal_analysis/sae_causal_analysis.json",
+      "sha256": "9a05b9e4ccb9c2ea8d65cdf89a264300c2884fba10ce4de1d769943065647683"
+    },
+    {
+      "artifact": "sae_causal_review.json",
+      "sha256": "f5b7183d0296c9c3ba150e93f7a08986400aba1b6392a5f2515136a0ab03ef21"
+    },
+    {
+      "artifact": "sae_comparison/comparison.json",
+      "sha256": "7275aba7682636cd3e8f5b6502deef1b2d08e0ab70448ce2b751fe351c3185ca"
+    },
+    {
+      "artifact": "sae_comparison/matched_geometry.json",
+      "sha256": "69ea93fc0a4742893cb2108c2d096163296024f64c7ecb1e5b010a80ea37676c"
+    },
+    {
+      "artifact": "sae_reconstruction_comparison.json",
+      "sha256": "f13eff960beb5cfe6c9937b75557e9f11dc3fb947693db70fe6ca8d776b70506"
+    },
+    {
+      "artifact": "study_protocol.json",
+      "sha256": "f2f1b6c34b97c310e17f7852a2f07df164381b732defcc5ab2cb85e5db73b58d"
+    }
+  ],
+  "final_presentation_review": {
+    "audit": "research/presentation_audit.json",
+    "pdf_sha256": "e3aa327c6371473961529d55ca92783f20f5ce503a4798c66b79479c4348735a",
+    "page_count": 22,
+    "passed": true
+  }
+}

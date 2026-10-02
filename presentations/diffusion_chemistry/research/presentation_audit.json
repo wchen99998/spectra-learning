@@ -1,0 +1,47 @@
+{
+  "status": "passed",
+  "created_at": "2026-09-30T05:12:49.944814+00:00",
+  "pdf_sha256": "b0a754898e8d144818026f0028355feda4464df71d78eadfc16d66daa8c70e3f",
+  "tex_sha256": "78a6928a6c38fd43f64201838bf47a4a0b0238d3c2db3464148643beeac54cc1",
+  "results_sha256": "6615b7be40304581afe7ebe9e69788ff3925e18cb8c596bf87f402c94a8691d5",
+  "plot_inputs_sha256": "bfa1196483b7a8de731884b2c7e4a54a93a4776ef3043883646f6bd5d1f1514b",
+  "evidence_index_sha256": "4a6c8399965cff11a598a92126d3506a974efee5c59276c19458ea4c15f169bf",
+  "plotting_source_sha256": "f3259e61728ccc6fbade87b758243fd00dce9c2cce275fc37a7d573e0b696021",
+  "pages": 7,
+  "all_pages_visually_reviewed_at_dpi": 180,
+  "standalone_figure_pdfs": 8,
+  "all_fonts_embedded": true,
+  "type3_fonts": [],
+  "vector_only": true,
+  "page_bounds_passed": true,
+  "latex_warnings": [
+    "Underfull \\hbox (badness 3049) in paragraph at lines 31--31",
+    "Underfull \\hbox (badness 2626) in paragraph at lines 75--75"
+  ],
+  "compact_input_audit": {
+    "numeric_values_checked": 1303,
+    "all_match": true,
+    "source_hashes_checked": 16,
+    "source_hashes_all_match": true
+  },
+  "isolated_source_bundle_rebuild": {
+    "status": "passed",
+    "temporary_root": "/tmp/diffusion-deck-rebuild-xv019i4o",
+    "copied_artifact_directory": false,
+    "used_model_or_gpu": false,
+    "used_existing_venv": "/mnt/data/spectra-learning/.venv",
+    "exit_code": 0,
+    "pdf_text_matches": true,
+    "layout_audit_passed": true,
+    "compact_input_sha256": "bfa1196483b7a8de731884b2c7e4a54a93a4776ef3043883646f6bd5d1f1514b"
+  },
+  "scientific_review": {
+    "readout": "Mean seed logits before AUROC; 145 fixed MACCS and 13 functional-group targets; 980/1,000 defined MACCS paired molecule bootstrap resamples; descriptive conditional intervals.",
+    "reconstruction": "FVE versus the training mean is separated from original-unit relative L2; no blanket claim of superior reconstruction.",
+    "selection": "All three frozen chemical candidates retained; missing concepts remain gaps; strongest test hydroxyl example explicitly illustrative in notes.",
+    "lineage": "All histories start at 0; nominal exposure is not unique spectra; same dataset contract; native m/z quantization confound retained.",
+    "causal_scope": "No isolated recipe effect, diffusion feature ablation, chemical sufficiency or fragment-assignment claim."
+  },
+  "previous_deck_unmodified": true,
+  "passed": true
+}

@@ -66,6 +66,9 @@ docs/tpu7x_mig_dws_investigation.md
 /presentations/**/*.pdf
 !/presentations/shared/assets/novogaia-logo.pdf
 !/presentations/spectra/assets/dynamics-modes.pdf
+# Final decks of the native chemistry studies (figure PDFs stay local).
+!/presentations/encoder_chemistry/encoder_chemistry.pdf
+!/presentations/diffusion_chemistry/diffusion_chemistry.pdf
 /presentations/spectra/figures/fig-09-dynamics.svg
 /presentations/**/*.zip
 /presentations/**/*.aux
@@ -78,6 +81,7 @@ docs/tpu7x_mig_dws_investigation.md
 /presentations/**/*.fdb_latexmk
 /presentations/**/*.synctex.gz
 /presentations/periodic_semantics/figures/*.svg
+/presentations/encoder_chemistry/figures/*.svg
 /presentations/shared/assets/PPNeueMontreal-*
 /presentations/spectra/research/md4_ar_sources/
 /presentations/spectra/research/novogaia-home.html
@@ -87,3 +91,12 @@ docs/tpu7x_mig_dws_investigation.md
 !/presentations/periodic_semantics/research/summary.json
 !/presentations/periodic_semantics/research/training_history.json
 !/presentations/periodic_semantics/research/legacy_*.json
+
+# Compact evidence and plot inputs for the native token/SAE chemistry report.
+!/presentations/encoder_chemistry/research/plot_inputs.json
+!/presentations/encoder_chemistry/research/summary.json
+!/presentations/encoder_chemistry/research/evidence_index.json
+!/presentations/diffusion_chemistry/research/plot_inputs.json
+!/presentations/diffusion_chemistry/research/report_plan.json
+!/presentations/diffusion_chemistry/research/evidence_index.json
+!/presentations/diffusion_chemistry/research/presentation_audit.json
