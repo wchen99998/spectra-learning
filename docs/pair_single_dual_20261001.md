@@ -878,10 +878,30 @@ spectra per GPU:
   broadcast-multiply-reduce form ran out of memory, and a fused reduction was
   10x slower at 39 or more tokens.
 
-| Peaks | Spectra/s per node | Peak memory | 2-node scaling |
-| --- | ---: | ---: | ---: |
-| 31 | 454 | 26 GB | 93% |
-| 63 | 137 | 73 GB | 97% |
+- From 4 nodes up, the gradient all-reduce dominated: 16 GPUs ran 199
+  spectra/s (5.2 s per step, 64 per GPU) and 32 GPUs about 9 s per step.
+  XLA's default 30 MB buckets ran at about 1 GB/s bus bandwidth inside the
+  step. The same network gives 85-89 GB/s on buckets of 128 MB or more.
+  Isambard's recommended NCCL settings alone gave 233; `NCCL_ALGO=Ring`,
+  `NCCL_PROTO=Simple` and 256 MB buckets
+  (`--xla_gpu_all_reduce_combine_threshold_bytes`) restore linear scaling.
+  `scripts/isambard_gh200_train.sbatch` sets all of them. Buckets of 1 GB or
+  more segfault.
+
+| Peaks | Spectra/s per node | Peak memory | 16 GPUs | 32 GPUs (batch 4096) |
+| --- | ---: | ---: | ---: | ---: |
+| 31 | 454 | 26 GB | 1793 (99%) | 3506 (97%) |
+| 63 | 137 | 73 GB | 541 (99%) | 984 (90%)* |
+
+\* Measured with Ring alone, before `NCCL_PROTO=Simple`.
+
+Without remat (`activation_checkpoint_mode = "none"`) the step fits at most
+64 spectra per GPU at 31 peaks (499 spectra/s per node) and 16 at 63 peaks
+(126). `"ordered_saved"` keeps the forward residuals and only orders the
+backward. It fits 128 and 32 spectra per GPU and runs 509 and 131 spectra/s
+per node: +12% at 31 peaks (1990 on 16 GPUs) but slower at 63 peaks, and at
+90 GB peak memory batch sizes near the limit fail unpredictably (96 per GPU
+ran out of memory where 128 fit).
 
 Disabling Triton GEMMs cost 30%; disabling command buffers changed nothing.
 The remaining overhead is mostly layout transposes around the channel-batched

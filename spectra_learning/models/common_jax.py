@@ -51,6 +51,9 @@ def activation_checkpoint_policy(mode: str):
     return None
 
 
+ORDERED_CHECKPOINT_MODES = frozenset({"ordered", "ordered_saved"})
+
+
 def activation_checkpoint(
     fn: Callable[..., Any],
     mode: str,
@@ -65,21 +68,24 @@ def activation_checkpoint(
     then, so ``jax.checkpoint`` saved no memory. This backward recomputes
     only once the cotangent arrives and releases the input cotangent together
     with the parameter gradients, one layer at a time: the 1B dual model's
-    sharded step at 128 spectra per GH200 went from 104 to 18 GiB. Modules
-    called this way must not update their state.
+    sharded step at 128 spectra per GH200 went from 104 to 18 GiB.
+    ``"ordered_saved"`` keeps the forward residuals instead of recomputing and
+    only orders the backward. Modules called this way must not update their
+    state.
     """
-    if mode != "ordered":
+    if mode not in ORDERED_CHECKPOINT_MODES:
         return nnx.remat(
             fn,
             policy=activation_checkpoint_policy(mode),
             static_argnums=static_argnums,
         )
-    return partial(_ordered_checkpoint_call, fn, static_argnums)
+    return partial(_ordered_checkpoint_call, fn, static_argnums, mode == "ordered")
 
 
 def _ordered_checkpoint_call(
     fn: Callable[..., Any],
     static_argnums: tuple[int, ...],
+    recompute: bool,
     *args: Any,
 ) -> Any:
     graphdefs = {}
@@ -101,20 +107,28 @@ def _ordered_checkpoint_call(
         ]
         return fn(*call_args)
 
-    return _ordered_checkpoint(pure)(dynamic)
+    return _ordered_checkpoint(pure, recompute)(dynamic)
 
 
-def _ordered_checkpoint(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
+def _ordered_checkpoint(
+    fn: Callable[[Any], Any], recompute: bool
+) -> Callable[[Any], Any]:
     @jax.custom_vjp
     def run(inputs: Any) -> Any:
         return fn(inputs)
 
     def forward(inputs: Any) -> tuple[Any, Any]:
-        return fn(inputs), inputs
+        if recompute:
+            return fn(inputs), inputs
+        # The pullback is a pytree holding the forward residuals.
+        return jax.vjp(fn, inputs)
 
-    def backward(inputs: Any, cotangent: Any) -> tuple[Any]:
-        inputs, cotangent = _floating_barrier((inputs, cotangent))
-        _, pullback = jax.vjp(fn, inputs)
+    def backward(saved: Any, cotangent: Any) -> tuple[Any]:
+        if recompute:
+            inputs, cotangent = _floating_barrier((saved, cotangent))
+            _, pullback = jax.vjp(fn, inputs)
+        else:
+            pullback = saved
         return _floating_barrier(pullback(cotangent))
 
     run.defvjp(forward, backward)

@@ -44,13 +44,29 @@ echo "$OVERRIDES"
 export WANDB_MODE=${WANDB_MODE:-offline} WANDB_DIR=$WORKDIR
 module load brics/aws-ofi-nccl/1.8.1
 export FI_PROVIDER=cxi FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd
+# Isambard's recommended NCCL/libfabric settings
+# (docs.isambard.ac.uk/user-documentation/guides/nccl).
+export NCCL_SOCKET_IFNAME=hsn NCCL_NET_GDR_LEVEL=PHB NCCL_CROSS_NIC=1 \
+  NCCL_MIN_NCHANNELS=4 NCCL_GDRCOPY_ENABLE=1 NCCL_NET_FORCE_FLUSH=0
+export FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_DEFAULT_TX_SIZE=2048 \
+  FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1 FI_HMEM_CUDA_USE_GDRCOPY=1 \
+  FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_THRESHOLD=0 FI_CXI_RDZV_GET_MIN=0 \
+  FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RX_MATCH_MODE=hybrid
 export NCCL_DEBUG=${NCCL_DEBUG_LEVEL:-WARN}
-# GPU performance settings (TPU runs set their own in train_sky.py). XLA's
-# defaults measured best for the 1B dual config; see its docstring.
+# From 4 nodes up, NCCL's tuner picks slow algorithms for XLA's default 30 MB
+# gradient buckets (~1 GB/s bus bandwidth inside the step): the 1B dual model
+# ran at 199 spectra/s on 16 GPUs (64 per GPU). Ring plus 256 MB buckets gives
+# 1412, and the Simple protocol keeps 97% of linear scaling on 32 GPUs (Ring
+# alone 72%). Buckets of 1 GB or more segfault.
+export NCCL_ALGO=${NCCL_ALGO:-Ring} NCCL_PROTO=${NCCL_PROTO:-Simple}
+# GPU performance settings (TPU runs set their own in train_sky.py).
 export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.92}
-export XLA_FLAGS="${XLA_FLAGS:-}"
+export XLA_FLAGS="--xla_gpu_all_reduce_combine_threshold_bytes=268435456 ${XLA_FLAGS:-}"
 export JAX_COORDINATOR_ADDRESS="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1):12345"
 export JAX_NUM_PROCESSES=$SLURM_NNODES
+# Imports from the home venv are slow when many nodes start at once; with
+# 32 nodes starting together, 3 of 8 processes missed the default 300 s.
+export JAX_INITIALIZATION_TIMEOUT=${JAX_INITIALIZATION_TIMEOUT:-1800}
 # JAX's Slurm detection assumes one process per GPU.
 export JAX_LOCAL_DEVICE_IDS=0,1,2,3
 

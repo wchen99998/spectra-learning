@@ -227,7 +227,8 @@ def test_dual_trains_every_path():
         assert sum(value for key, value in flat.items() if name in key) > 0, name
 
 
-def test_ordered_checkpointing_matches_plain_gradients():
+@pytest.mark.parametrize("ordered_mode", ["ordered", "ordered_saved"])
+def test_ordered_checkpointing_matches_plain_gradients(ordered_mode):
     """Ordered recomputation (the GPU remat mode) changes memory, not values."""
     batch = {k: jnp.asarray(v) for k, v in _batch(7).items()}
 
@@ -247,12 +248,12 @@ def test_ordered_checkpointing_matches_plain_gradients():
 
         # Each checkpointed block holds its recomputation behind a barrier.
         jaxpr = str(jax.make_jaxpr(jax.grad(loss))(params))
-        assert (jaxpr.count("optimization_barrier") > 0) == (mode == "ordered")
+        assert (jaxpr.count("optimization_barrier") > 0) == (mode != "none")
         value, grads = jax.jit(jax.value_and_grad(loss))(params)
         return value, dict(nnx.to_flat_state(grads))
 
     plain_loss, plain = loss_and_grads("none")
-    ordered_loss, ordered = loss_and_grads("ordered")
+    ordered_loss, ordered = loss_and_grads(ordered_mode)
     np.testing.assert_allclose(ordered_loss, plain_loss, rtol=1e-6)
     assert ordered.keys() == plain.keys()
     for path in plain:

@@ -19,8 +19,13 @@ GPU performance (GH200, 128 spectra per GPU, no gradient accumulation):
 ``activation_checkpoint_mode='ordered'`` is required, since nnx.remat saves no
 memory in multi-GPU programs (see common_jax.activation_checkpoint). Peak
 memory is 26 GB at 31 peaks and 73 GB at 63 peaks. One node runs 454 and
-137 spectra/s; two nodes keep 93% and 97% of linear scaling. On 16 GPUs that
-is about 1.2 s per step at 31 peaks and 4 s per step at 63 peaks.
+137 spectra/s. 16 GPUs run 1793 and 541 spectra/s (1.14 and 3.78 s per
+step, 99% of linear scaling) with the NCCL settings and 256 MB gradient
+buckets of scripts/isambard_gh200_train.sbatch; NCCL's defaults give 199.
+32 GPUs at 128 per GPU (batch 4096) run 3506 spectra/s at 31 peaks.
+Without remat the step fits at most 64 (31 peaks) or 16 (63 peaks) spectra
+per GPU; ``'ordered_saved'`` (no recompute) fits 128 / 32 and runs 1990
+spectra/s on 16 GPUs at 31 peaks, at 90 GB peak memory.
 """
 
 from ml_collections import config_dict
