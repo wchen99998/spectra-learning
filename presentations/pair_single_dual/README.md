@@ -18,9 +18,10 @@ Slide sources: 1–5 use the worklog overview and §§2–6; 6–9 use §8; 10 u
 
 The presentation summarises the recorded experiments; the underlying runs were not rerun or independently audited. The worklog's rounded tables can differ slightly from its deltas calculated using unrounded results. The older C128 capacity caveat is presented before the C256 results that address it. Finer bins also enlarge the heads, so the bin-width comparison does not isolate resolution from parameter count.
 
-Candidate reproduction command (flags checked against `scripts/pair_single_dual_pilot.py`; source worklog retains its original wave-1 example):
+Candidate reproduction command. The pilot scripts were removed after the recipe became `training_mode="dual"`; check out commit `78eb2c0` to run it (flags checked against `scripts/pair_single_dual_pilot.py` there; source worklog retains its original wave-1 example):
 
 ```sh
+git checkout 78eb2c0
 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -m scripts.pair_single_dual_pilot \
   --arm dual_bias_mean_gated --single-dim 256 --pair-dim 256 \
   --mz-bin-size 0.1 --masking random --seed 0 --steps 20000 \

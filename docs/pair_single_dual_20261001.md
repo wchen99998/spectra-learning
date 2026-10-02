@@ -1,7 +1,8 @@
 # Pair→single information flow with pair distogram supervision
 
-Research date: 2026-10-01. Status: waves 1–9 are complete (wave 9's R=32 run is still
-training).
+Research date: 2026-10-01. Status: waves 1–9 are complete (wave 9's R=32 run was
+cancelled once R ≤ 12 settled the question). The best recipe is now the library
+`training_mode="dual"` (Section 15).
 
 **Answer (seed 0):** add a pair distogram loss on the encoder pairs, and keep
 three pair→single paths: the attention bias, mean pair values, and the
@@ -25,10 +26,12 @@ AUC to 0.763 / 0.741, and keeps retrieval. Within-bin regression heads
 at most 0.005, which is within plausible seed noise. They clearly help only
 with coarse 2 Da bins.
 
-Code:
-`scripts/pair_single_dual_pilot.py`, `scripts/pair_single_dual_eval.py`,
+Code: the pilot, evaluation and report scripts
+(`scripts/pair_single_dual_pilot.py`, `scripts/pair_single_dual_eval.py`,
 `scripts/pair_single_dual_metadata.py`, `scripts/report_pair_single_dual.py`,
-`tests/test_pair_single_dual_pilot.py`.
+`tests/test_pair_single_dual_pilot.py`, and the `pair_to_single_*` scripts of
+the earlier mechanism study) are kept at commit `78eb2c0` and removed from the
+tree. The winning recipe is implemented in the library (Section 15).
 
 ## 1. Question
 
@@ -772,7 +775,7 @@ aligned at once.
 | 4 | 24 / 36 | 4.104 | 3.305 | 0.743 / 0.724 | 0.760 / 0.738 | 26.6 / 39.0 | 10.5 |
 | 8 | 28 / 40 | 4.115 | 3.307 | **0.746** / 0.731 | 0.758 / 0.744 | 25.9 / 37.1 | 8.0 |
 | 12 | **32** / 44 | 4.095 | 3.315 | 0.742 / 0.725 | 0.761 / 0.742 | 25.2 / 38.2 | 7.3 |
-| 32 | 52 / **64** | running | | | | | 2.6 |
+| 32 | 52 / **64** | cancelled | | | | | 2.6 |
 | 44 | **64** / 76 | out of memory (68 GB allocation at batch 128) | | | | | — |
 
 Findings:
@@ -794,6 +797,8 @@ provides $O(T^2)$ scratch state, and CLS (with `cls_edge`) is a global token,
 which plausibly covers what registers supply in ViTs.
 
 ## 14. Reproduction
+
+The pilot scripts live at commit `78eb2c0` (`git checkout 78eb2c0` first).
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -m scripts.pair_single_dual_pilot \
@@ -830,3 +835,24 @@ Isambard launcher: `~/spectra-p2s/p2s_queue.sbatch` (`SPECS="arm:seed …"`,
 `wave9_registers`). Evaluation JSON files are copied to
 `artifacts/pair_single_dual_20261001/<wave>/`. Tests and evaluation run as
 Slurm jobs, never on the login node.
+
+## 15. Library implementation (`training_mode="dual"`)
+
+The best recipe (`dual_bias_mean_gated`, C=D, 0.1 Da bins, `cls_edge`
+metadata) is a `PeakSetJEPAJax` training mode, trained by the standard JAX
+pretraining loop:
+
+| Pilot | Library |
+| --- | --- |
+| joint MAE model + separate pair-only model without encoder | one model: fastmixer encoder (pair path), `masked_latent_predictor` (cross-attention, MAE), `pair_predictor` (PairOnlyBlocks), `pair_mask_token`, `distogram_head` |
+| `BridgedBlock` with `mean` + `gated` bridges | `PairMixerBlock.pair_to_single` (`PairToSingleBridge`, `pair_to_single_rank`) applied after each fastmixer block, in both the compact and the scattered-single paths |
+| `MetadataInjection` with site `cls_edge` | `encoder_metadata_conditioning="precursor_edge"` (`PrecursorEdgeEmbedder`, condition MLP `MetadataEmbedder`), `massive_v2_acquisition_v1` vectors from the collator with `spectrum_metadata_dropout_probability` |
+| `dual_forward`: 0.7 MAE + 0.3 distogram | `forward_dual`: `mae_loss_weight` + `distogram_loss_weight` |
+
+With the pilot's parameters copied into the library model, the loss terms and
+the CLS readout are identical (checked with perturbed, non-zero edge heads).
+Tests: `tests/test_dual_jax.py`.
+
+Not carried over: Thompson-span masking, within-bin offset heads, register
+tokens, the adduct field, the IPA readout, `dualplus`, and the token / CLS /
+FiLM / `pair_in` / `final` metadata sites.

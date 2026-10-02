@@ -113,7 +113,7 @@ def _target_parts(config: Any) -> list[str]:
 def _objective_parts(config: Any) -> list[str]:
     parts: list[str] = []
     has_mz_bin_part = False
-    if str(config.get("training_mode", "jepa")).lower() == "mae":
+    if str(config.get("training_mode", "jepa")).lower() in {"mae", "dual"}:
         parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
         parts.extend(_mz_objective_parts(config))

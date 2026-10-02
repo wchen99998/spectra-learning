@@ -31,6 +31,7 @@ from spectra_learning.models.pairmixer_jax import (
     _scatter_pair,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
+from spectra_learning.models.precursor_edges_jax import PrecursorEdgeEmbedder
 from spectra_learning.models.spectrum_metadata import MASSIVE_V2_CONDITION_DIM
 from spectra_learning.models.settings import PeakSetJEPASettings
 
@@ -139,10 +140,15 @@ class PeakSetEncoder(nnx.Module):
         metadata_conditioning: str = "additive",
         metadata_condition_dim: int = 256,
         mz_quantization_bin_size: float | None = None,
+        pair_to_single_rank: int | None = None,
         rngs: nnx.Rngs | None = None,
         compute_dtype: object = jnp.float32,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
+        if metadata_conditioning == "precursor_edge" and not (
+            use_pair_path and use_cls_token
+        ):
+            raise ValueError("precursor_edge metadata requires the pair path and CLS token")
         self.num_layers = num_layers
         self.mz_quantization_bin_size = mz_quantization_bin_size
         self.use_cls_token = use_cls_token
@@ -170,7 +176,7 @@ class PeakSetEncoder(nnx.Module):
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
         self.embedder = embedder
-        if self.metadata_conditioning == "adaln_zero":
+        if self.metadata_conditioning in {"adaln_zero", "precursor_edge"}:
             self.metadata_embedder = MetadataEmbedder(
                 metadata_condition_dim,
                 compute_dtype=compute_dtype,
@@ -242,6 +248,7 @@ class PeakSetEncoder(nnx.Module):
                     use_fastmixer=self.use_fastmixer,
                     fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
                     transition_type=pairmixer_transition_type,
+                    pair_to_single_rank=pair_to_single_rank,
                     compute_dtype=compute_dtype,
                     rngs=rngs,
                 )
@@ -285,6 +292,17 @@ class PeakSetEncoder(nnx.Module):
             if self.use_pair_path and apply_final_pair_norm
             else None
         )
+        self.precursor_edges = (
+            PrecursorEdgeEmbedder(
+                pair_dim,
+                metadata_condition_dim,
+                precursor_mz_scale=pairmixer_precursor_mz_scale,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            if self.metadata_conditioning == "precursor_edge"
+            else None
+        )
 
     def _append_cls_token(
         self,
@@ -299,7 +317,8 @@ class PeakSetEncoder(nnx.Module):
         return jnp.concatenate([x, cls.astype(x.dtype)], axis=1)
 
     def _metadata_embedding(self, spectrum_metadata: Array | None, dtype: object) -> Array | None:
-        if spectrum_metadata is None:
+        # Precursor-edge metadata enters through pairs only (_embed_pairs).
+        if spectrum_metadata is None or self.precursor_edges is not None:
             return None
         if self.metadata_conditioning == "adaln_zero":
             return self.metadata_embedder(spectrum_metadata.astype(dtype))
@@ -357,6 +376,30 @@ class PeakSetEncoder(nnx.Module):
             self.cls_to_peak_pair_token[...], self.cls_cls_pair_token[...],
         )
 
+    def _embed_pairs(
+        self,
+        peak_mz: Array,
+        peak_intensity: Array,
+        x: Array,
+        peak_visible_mask: Array,
+        precursor_mz: Array | None,
+        spectrum_metadata: Array | None,
+    ) -> Array:
+        z = cast(PairFeatureEmbedder, self.pair_embedder)(
+            self._quantize_mz(peak_mz),
+            peak_intensity,
+            x,
+            peak_visible_mask,
+            precursor_mz=precursor_mz,
+        )
+        z = self._append_cls_pair_tokens(z)
+        if self.precursor_edges is not None and spectrum_metadata is not None:
+            condition = self.metadata_embedder(spectrum_metadata.astype(x.dtype))
+            z = self.precursor_edges(
+                z, peak_mz, spectrum_metadata, condition, peak_visible_mask
+            )
+        return z
+
     def _append_cls_mask(self, peak_mask: Array) -> Array:
         if not self.use_cls_token:
             return peak_mask
@@ -382,18 +425,18 @@ class PeakSetEncoder(nnx.Module):
             visible_mask,
             spectrum_metadata,
         )
-        z = cast(PairFeatureEmbedder, self.pair_embedder)(
-            self._quantize_mz(peak_mz),
+        z = self._embed_pairs(
+            peak_mz,
             peak_intensity,
             x,
             peak_visible_mask,
-            precursor_mz=precursor_mz,
+            precursor_mz,
+            spectrum_metadata,
         )
         x = self._append_cls_token(
             x,
             metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
         )
-        z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         if self.use_fastmixer:
             x, z = self._forward_fastmixer_blocks(
@@ -450,18 +493,18 @@ class PeakSetEncoder(nnx.Module):
             visible_mask,
             spectrum_metadata,
         )
-        z = cast(PairFeatureEmbedder, self.pair_embedder)(
-            self._quantize_mz(peak_mz),
+        z = self._embed_pairs(
+            peak_mz,
             peak_intensity,
             x,
             peak_visible_mask,
-            precursor_mz=precursor_mz,
+            precursor_mz,
+            spectrum_metadata,
         )
         x = self._append_cls_token(
             x,
             metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
         )
-        z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         x, z, idx, compact_token_mask = self._forward_fastmixer_blocks_compact(
             x,

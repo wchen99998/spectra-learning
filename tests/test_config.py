@@ -59,6 +59,8 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
         "mae_mz_objective",
         "mae_mz_ordinal_epsilon",
         "mae_mz_ordinal_radius_bins",
+        "pair_predictor_num_layers",
+        "pair_to_single_rank",
         "pairmixer_fast_encoder_max_visible_tokens",
         "pairmixer_fast_max_visible_tokens",
         "pairmixer_fourier_x_max",

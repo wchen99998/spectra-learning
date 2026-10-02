@@ -32,6 +32,7 @@ from spectra_learning.models.pairmixer_jax import (
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.settings import (
+    DUAL_TRAINING_MODE,
     PAIR_DISTOGRAM_TRAINING_MODE,
     PeakSetJEPASettings,
     encoder_uses_pair_path,
@@ -128,6 +129,7 @@ def build_peak_set_encoder_jax(
             if cfg.mae_objective == "absorbing_diffusion"
             else None
         ),
+        pair_to_single_rank=cfg.pair_to_single_rank,
         pairmixer_fast_max_visible_tokens=(
             pairmixer_fast_encoder_max_visible_tokens
         ),
@@ -227,6 +229,16 @@ class PeakSetJEPAJax(nnx.Module):
                 raise ValueError("pair_distogram requires other loss weights to be zero")
             if cfg.encoder_metadata_schema and cfg.encoder_metadata_conditioning != "adaln_zero":
                 raise ValueError("pair_distogram metadata requires adaln_zero conditioning")
+        self.is_dual = self.training_mode == DUAL_TRAINING_MODE
+        if self.is_dual:
+            if not self.use_fastmixer or not cfg.encoder_use_cls_token:
+                raise ValueError("dual requires the fastmixer encoder with a CLS token")
+            if cfg.masked_token_input_mode != "latent_token":
+                raise ValueError("dual requires masked_token_input_mode='latent_token'")
+            if cfg.mae_loss_weight <= 0 or cfg.distogram_loss_weight <= 0:
+                raise ValueError("dual requires positive mae and distogram loss weights")
+        # Pair predictor (PairOnlyBlocks) reading the encoder's pair tensor.
+        self.uses_pair_predictor = self.is_pair_distogram or self.is_dual
         self.encoder_pair_dim = (
             cfg.model_dim
             if cfg.pairmixer_pair_dim is None
@@ -271,10 +283,14 @@ class PeakSetJEPAJax(nnx.Module):
         self.masked_mz_sentinel = cfg.masked_mz_sentinel
         self.mae_loss_weight = cfg.mae_loss_weight
         self.masked_token_loss_weight = (
-            0.0 if self.training_mode == "mae" else cfg.masked_token_loss_weight
+            0.0
+            if self.training_mode in {"mae", DUAL_TRAINING_MODE}
+            else cfg.masked_token_loss_weight
         )
         self.jepa_mae_loss_weight = (
-            0.0 if self.training_mode == "mae" else cfg.jepa_mae_loss_weight
+            0.0
+            if self.training_mode in {"mae", DUAL_TRAINING_MODE}
+            else cfg.jepa_mae_loss_weight
         )
         if cfg.latent_pair_loss_weight > 0:
             raise ValueError(
@@ -370,23 +386,26 @@ class PeakSetJEPAJax(nnx.Module):
             if not self.is_pair_distogram and self.predictor_dim != self.model_dim
             else Identity()
         )
+        def pair_predictor_block(index: int) -> PairOnlyBlock:
+            return PairOnlyBlock(
+                pair_dim=self.encoder_pair_dim,
+                attention_mlp_multiple=cfg.predictor_mlp_multiple,
+                norm_eps=self.norm_eps,
+                transition_type=self.pairmixer_transition_type,
+                triangle_attention_num_heads=(
+                    cfg.pairmixer_triangle_attention_num_heads
+                    if cfg.pairmixer_triangle_attention_every_n_layers
+                    and (index + 1) % cfg.pairmixer_triangle_attention_every_n_layers == 0
+                    else None
+                ),
+                compute_dtype=self.compute_dtype,
+                rngs=rngs,
+            )
+
         predictor_blocks: list[Any] = []
         for index in range(cfg.masked_latent_predictor_num_layers):
             block = (
-                PairOnlyBlock(
-                    pair_dim=self.encoder_pair_dim,
-                    attention_mlp_multiple=cfg.predictor_mlp_multiple,
-                    norm_eps=self.norm_eps,
-                    transition_type=self.pairmixer_transition_type,
-                    triangle_attention_num_heads=(
-                        cfg.pairmixer_triangle_attention_num_heads
-                        if cfg.pairmixer_triangle_attention_every_n_layers
-                        and (index + 1) % cfg.pairmixer_triangle_attention_every_n_layers == 0
-                        else None
-                    ),
-                    compute_dtype=self.compute_dtype,
-                    rngs=rngs,
-                )
+                pair_predictor_block(index)
                 if self.is_pair_distogram
                 else CrossAttentionBlock(
                     dim=self.predictor_dim,
@@ -404,18 +423,29 @@ class PeakSetJEPAJax(nnx.Module):
             )
             predictor_blocks.append(block)
         self.masked_latent_predictor = nnx.List(predictor_blocks)
+        self.pair_predictor = (
+            nnx.List([
+                pair_predictor_block(index)
+                for index in range(
+                    cfg.pair_predictor_num_layers
+                    or cfg.masked_latent_predictor_num_layers
+                )
+            ])
+            if self.is_dual
+            else None
+        )
         # Marks pair entries whose m/z was hidden from the encoder.
         self.pair_mask_token = (
             nnx.Param(
                 rngs.params.normal((self.encoder_pair_dim,), dtype=jnp.float32)
                 * 0.02
             )
-            if self.is_pair_distogram
+            if self.uses_pair_predictor
             else None
         )
         self.predictor_pair_norm = (
             RMSNorm(self.encoder_pair_dim, eps=self.norm_eps, affine=True)
-            if self.is_pair_distogram and cfg.predictor_apply_final_norm
+            if self.uses_pair_predictor and cfg.predictor_apply_final_norm
             else None
         )
         self.predictor_final_norm = (
@@ -457,7 +487,7 @@ class PeakSetJEPAJax(nnx.Module):
         # A distogram-only run sets mae_loss_weight to 0; without this the m/z
         # and intensity heads are still built and still run every step.
         self.uses_mae_value_heads = self.jepa_mae_loss_weight > 0 or (
-            self.training_mode == "mae" and self.mae_loss_weight > 0
+            self.training_mode in {"mae", DUAL_TRAINING_MODE} and self.mae_loss_weight > 0
         )
         if cfg.mae_mz_head not in {"linear", "readout"}:
             raise ValueError(f"Unknown mae_mz_head: {cfg.mae_mz_head}")
@@ -493,7 +523,7 @@ class PeakSetJEPAJax(nnx.Module):
         # latents down first is what keeps that affordable: at predictor_dim it
         # is the largest activation in the step.
         distogram_input_dim = (
-            self.encoder_pair_dim if self.is_pair_distogram else self.predictor_dim
+            self.encoder_pair_dim if self.uses_pair_predictor else self.predictor_dim
         )
         self.distogram_pair_proj = (
             Linear(
@@ -561,6 +591,12 @@ class PeakSetJEPAJax(nnx.Module):
             )
         if self.training_mode == "mae":
             return self.forward_mae(
+                augmented_batch,
+                return_collapse_data=return_collapse_data,
+                loss_only=loss_only,
+            )
+        if self.is_dual:
+            return self.forward_dual(
                 augmented_batch,
                 return_collapse_data=return_collapse_data,
                 loss_only=loss_only,
@@ -1044,6 +1080,82 @@ class PeakSetJEPAJax(nnx.Module):
             return metrics, {}
         return metrics
 
+    def forward_dual(
+        self,
+        augmented_batch: dict[str, Array],
+        *,
+        return_collapse_data: bool = False,
+        loss_only: bool = False,
+    ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
+        """Encode the context once; MAE from singles, distogram from pairs."""
+        peak_mz = augmented_batch["peak_mz"]
+        peak_intensity = augmented_batch["peak_intensity"]
+        peak_valid_mask = augmented_batch["peak_valid_mask"]
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
+        target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
+        target_union = jnp.any(target_masks, axis=1)
+        context_mask = augmented_batch["context_mask"] & peak_valid_mask & ~target_union
+        single, pair, idx, compact_token_mask = self.encoder.forward_with_pair_compact(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
+            max_visible_tokens=self.pairmixer_fast_encoder_max_visible_tokens,
+            precursor_mz=augmented_batch.get("precursor_mz", None),
+            spectrum_metadata=spectrum_metadata,
+        )
+        predicted, target_positions, target_mask, _ = (
+            self._predict_augmented_target_outputs_fastmixer_compact(
+                single,
+                idx,
+                compact_token_mask,
+                context_mask,
+                target_masks,
+                peak_mz,
+            )
+        )
+        flat_peak_mz, flat_peak_intensity = self._flatten_peak_values_for_target_views(
+            peak_mz,
+            peak_intensity,
+            target_masks.shape[1],
+        )
+        peak_idx = jnp.minimum(target_positions, peak_mz.shape[1] - 1)
+        mae_term, mae_metrics = self._mae_metrics_compact(
+            predicted,
+            jnp.take_along_axis(flat_peak_mz, peak_idx, axis=1),
+            jnp.take_along_axis(flat_peak_intensity, peak_idx, axis=1),
+            target_mask,
+            reference=single,
+            compute_accuracy=not loss_only,
+        )
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            self._distogram_loss_pair_branch(
+                pair,
+                idx,
+                compact_token_mask,
+                target_union,
+                peak_mz,
+            ),
+            pair,
+        )
+        loss = mae_term + distogram_term
+        if loss_only:
+            return {"loss": loss}
+        valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
+        metrics = {
+            "loss": loss,
+            "context_fraction": context_mask.astype(jnp.float32).sum()
+            / valid_peak_count,
+        }
+        metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
+        metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
+        if return_collapse_data:
+            return metrics, {}
+        return metrics
+
     def _pair_predictor_inputs(
         self,
         pair: Array,
@@ -1053,18 +1165,19 @@ class PeakSetJEPAJax(nnx.Module):
     ) -> tuple[Array, Array, Array]:
         """Keep encoded context pairs and seed new pairs with masked queries."""
         num_cls = int(self.encoder_use_cls_token)
+        num_peaks = target_union.shape[1]
         batch_idx = jnp.arange(pair.shape[0])[:, None]
         context = jnp.zeros(
-            (pair.shape[0], self.num_peak_tokens + num_cls), dtype=jnp.bool_,
+            (pair.shape[0], num_peaks + num_cls), dtype=jnp.bool_,
         ).at[batch_idx, idx].set(compact_token_mask)
         predictor_idx, predictor_mask = _active_indices(
-            context[:, :self.num_peak_tokens] | target_union,
+            context[:, :num_peaks] | target_union,
             self.pairmixer_fast_max_visible_tokens - num_cls,
         )
         if num_cls:
             predictor_idx = jnp.concatenate([
                 predictor_idx,
-                jnp.full((pair.shape[0], 1), self.num_peak_tokens, dtype=idx.dtype),
+                jnp.full((pair.shape[0], 1), num_peaks, dtype=idx.dtype),
             ], axis=1)
             predictor_mask = jnp.concatenate([
                 predictor_mask, jnp.ones((pair.shape[0], 1), dtype=jnp.bool_),
@@ -1114,7 +1227,8 @@ class PeakSetJEPAJax(nnx.Module):
             jnp.pad(peak_mz, ((0, 0), (0, num_cls))), idx, axis=1,
         )
         predicted = run_pair_only_blocks(
-            self.masked_latent_predictor, predicted, compact_token_mask, None,
+            self.pair_predictor if self.is_dual else self.masked_latent_predictor,
+            predicted, compact_token_mask, None,
             checkpoint_mode=(
                 self.activation_checkpoint_mode
                 if "predictor" in self.activation_checkpoint_modules else "none"
@@ -1609,7 +1723,8 @@ class PeakSetJEPAJax(nnx.Module):
             )
         )
         distogram_loss = None
-        if self.distogram_loss_weight > 0:
+        # In dual mode the pair predictor scores the distogram instead.
+        if self.distogram_loss_weight > 0 and not self.is_dual:
             flat_context_mask = jnp.broadcast_to(
                 context_mask[:, None],
                 (batch_size, num_target_blocks, num_peaks),

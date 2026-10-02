@@ -30,6 +30,6 @@ def finalize_config(config: config_dict.ConfigDict) -> None:
     )
     config.resolved_pairmixer_fast_encoder_max_visible_tokens = (
         pairmixer_fast_mae_encoder_visible_tokens(config)
-        if str(config.get("training_mode", "jepa")).lower() == "mae"
+        if str(config.get("training_mode", "jepa")).lower() in {"mae", "dual"}
         else pairmixer_fast_required_visible_tokens(config)
     )

@@ -7,6 +7,11 @@ from spectra_learning.data.gems.masking import jepa_mask_lengths_for_valid_count
 from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS
 
 
+# Modes whose encoder sees only the context and whose predictor sees context
+# plus targets, so both run at compact capacities below the full peak count.
+MASKED_CAPACITY_TRAINING_MODES = frozenset({"mae", "pair_distogram", "dual"})
+
+
 def _num_cls_tokens(config: Any) -> int:
     return int(bool(config.get("encoder_use_cls_token", True)))
 
@@ -64,7 +69,12 @@ def _mae_fast_capacities(
         config.get("masked_token_input_mode", "latent_token")
     ).lower()
     num_cls_tokens = _num_cls_tokens(config)
-    pair_distogram = str(config.get("training_mode", "jepa")).lower() == "pair_distogram"
+    # The pair predictor queries every pair touching a target, so it holds the
+    # context plus the union of all target blocks.
+    pair_predictor = str(config.get("training_mode", "jepa")).lower() in {
+        "pair_distogram",
+        "dual",
+    }
 
     encoder_max_visible = 1
     predictor_max_visible = 1
@@ -83,9 +93,9 @@ def _mae_fast_capacities(
             max(valid_count - context_len, 0),
             num_target_blocks * target_len,
         )
-        if masked_token_input_mode == "mz_sentinel" and not pair_distogram:
+        if masked_token_input_mode == "mz_sentinel" and not pair_predictor:
             encoder_visible = context_len + target_union_len + num_cls_tokens
-        predictor_targets = target_union_len if pair_distogram else target_len
+        predictor_targets = target_union_len if pair_predictor else target_len
         predictor_visible = context_len + predictor_targets + num_cls_tokens
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
@@ -137,7 +147,7 @@ def pairmixer_fast_required_visible_tokens(
     if mode == "full_visible":
         return pairmixer_fast_full_visible_tokens(config)
     training_mode = str(config.get("training_mode", "jepa")).lower()
-    if training_mode in {"mae", "pair_distogram"}:
+    if training_mode in MASKED_CAPACITY_TRAINING_MODES:
         return pairmixer_fast_mae_visible_tokens(config)
     return pairmixer_fast_full_visible_tokens(config)
 
@@ -169,6 +179,6 @@ def resolve_pairmixer_fast_encoder_max_visible_tokens(
     if mode != "train":
         return pairmixer_fast_required_visible_tokens(config, mode=mode)
     training_mode = str(config.get("training_mode", "jepa")).lower()
-    if training_mode in {"mae", "pair_distogram"}:
+    if training_mode in MASKED_CAPACITY_TRAINING_MODES:
         return pairmixer_fast_mae_encoder_visible_tokens(config)
     return pairmixer_fast_full_visible_tokens(config)

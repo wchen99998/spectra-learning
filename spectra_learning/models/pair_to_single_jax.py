@@ -1,13 +1,20 @@
-"""Experimental direct pair-value readout for a compact joint encoder.
+"""Pair->single residual bridges for the joint fastmixer encoder.
 
-Pool before projecting: the expensive pair-width -> message-width projection
-acts on N rows, rather than N**2 edges. This module returns a residual update;
-it does not change the existing single attention or any training defaults.
+The attention-logit bias passes one scalar per edge and head from pairs to
+singles, so pair content reaches singles only through attention routing. In
+``training_mode="dual"`` every fastmixer block adds two direct value paths
+after its own updates (docs/pair_single_dual_20261001.md):
+
+* mean:  u_i = g_m * RMSNorm(W_o W_v RMSNorm(mean_j z_ij))
+* gated: m_i = mean_j sigmoid(G zn_ij) * (V sn_j) + P mean_j zn_ij,
+         u_i = g_g * RMSNorm(W m_i),  with zn = RMSNorm(z), sn = RMSNorm(s)
+
+The per-channel scales g start at 0.1, so the pair stream receives gradients
+from singles at the first step. Inputs share one compact token axis; invalid
+tokens are excluded from every mean and receive a zero update.
 """
 
 from __future__ import annotations
-
-import math
 
 import jax
 import jax.numpy as jnp
@@ -15,88 +22,55 @@ from flax import nnx
 
 from spectra_learning.models.common_jax import Linear, RMSNorm
 
+Array = jax.Array
 
-class PairToSingleReadout(nnx.Module):
-    """Multi-head row pooling of pair *values*, with a dense mean path.
 
-    Each head averages its learned attention with uniform valid-edge weights.
-    Thus sharp routing cannot turn off the entire dense value path. Heads use
-    separate low-rank projections after pooling. A small, nonzero channel scale
-    permits gradients into pairs from the first step, including for equal singles.
+def _masked_row_mean(values: Array, token_mask: Array, dtype: object) -> Array:
+    # A reduction lets XLA fuse the broadcast/cast backward pass; a GEMM
+    # formulation can materialize an N-by-N FP32 gradient.
+    total = jnp.sum(
+        jnp.where(token_mask[:, None, :, None], values.astype(dtype), 0),
+        axis=2,
+        dtype=jnp.float32,
+    )
+    return total / jnp.maximum(token_mask.sum(1), 1)[:, None, None]
 
-    Inputs must share the same compact token axis (including CLS if present).
-    Invalid pairs must contain finite padding values. Pair direction is retained:
-    row i summarizes outgoing relations z[i, j], without symmetrization.
-    """
+
+class PairMeanMessage(nnx.Module):
+    """Normalized mean of each token's outgoing pair row, low-rank projected."""
 
     def __init__(
         self,
         single_dim: int,
         pair_dim: int,
         *,
-        num_heads: int = 4,
-        head_dim: int = 32,
-        residual_scale: float = 0.1,
-        norm_eps: float = 1e-5,
-        compute_dtype: object = jnp.float32,
-        rngs: nnx.Rngs | None = None,
+        rank: int,
+        residual_scale: float,
+        norm_eps: float,
+        compute_dtype: object,
+        rngs: nnx.Rngs,
     ) -> None:
-        if min(single_dim, pair_dim, num_heads, head_dim) <= 0:
-            raise ValueError("readout dimensions and head counts must be positive")
-        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.compute_dtype = compute_dtype
-        self.precision = (jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16
-                          else jax.lax.Precision.HIGHEST)
         self.pair_norm = RMSNorm(pair_dim, eps=norm_eps, affine=False)
-        self.score = Linear(pair_dim, num_heads, bias=False,
+        self.value = Linear(pair_dim, rank, bias=False,
                             compute_dtype=compute_dtype, rngs=rngs)
-        self.head_weight = nnx.Param(
-            rngs.params.normal((num_heads, pair_dim, head_dim), dtype=jnp.float32)
-            / math.sqrt(pair_dim)
-        )
-        self.out = Linear(num_heads * head_dim, single_dim, bias=False,
+        self.out = Linear(rank, single_dim, bias=False,
                           compute_dtype=compute_dtype, rngs=rngs)
         self.output_norm = RMSNorm(single_dim, eps=norm_eps, affine=False)
         self.scale = nnx.Param(jnp.full((single_dim,), residual_scale, jnp.float32))
 
-    def pool(self, pair: jax.Array, token_mask: jax.Array) -> jax.Array:
-        normalized = self.pair_norm(pair).astype(self.compute_dtype)
-        key_mask = token_mask[:, None, :, None]
-        scores = self.score(normalized).astype(jnp.float32)
-        scores = jnp.where(key_mask, scores, jnp.finfo(jnp.float32).min)
-        attention = jax.nn.softmax(scores, axis=2) * key_mask
-        uniform = key_mask / jnp.maximum(key_mask.sum(axis=2, keepdims=True), 1)
-        weights = (0.5 * (attention + uniform)).astype(self.compute_dtype)
-        pooled = jnp.einsum(
-            "bijh,bijc->bihc", weights, normalized,
-            precision=self.precision,
-            preferred_element_type=jnp.float32,
-        ).astype(self.compute_dtype)
-        return pooled * token_mask[:, :, None, None]
-
-    def __call__(self, pair: jax.Array, token_mask: jax.Array) -> jax.Array:
-        return self.project(self.pool(pair, token_mask), token_mask)
-
-    def project(self, pooled: jax.Array, token_mask: jax.Array) -> jax.Array:
-        """Project pooled [batch, token, head, pair-channel] messages."""
-        messages = jnp.einsum(
-            "bihc,hcr->bihr", pooled, self.head_weight[...].astype(self.compute_dtype),
-            precision=self.precision,
-            preferred_element_type=jnp.float32,
-        ).astype(self.compute_dtype)
-        messages = messages.reshape(*messages.shape[:2], -1)
-        update = self.output_norm(self.out(messages))
+    def __call__(self, pair: Array, token_mask: Array) -> Array:
+        pooled = self.pair_norm(_masked_row_mean(pair, token_mask, self.compute_dtype))
+        update = self.output_norm(self.out(self.value(pooled)))
         return update * self.scale[...].astype(update.dtype) * token_mask[..., None]
 
 
-class PairSummaryToSingleReadout(nnx.Module):
-    """Reduce or gather pairs before normalization and low-rank projection.
+class EdgeGatedMessage(nnx.Module):
+    """Channel-wise pair-gated neighbor messages plus mean pair values.
 
-    ``mean`` reads each valid outgoing row once and normalizes its mean.
-    ``cls`` reads only the updated outgoing/incoming CLS edges of each token.
-    Both normalize O(N) vectors, with no normalized N-by-N pair activation.
-    The CLS variant requires one valid CLS position per nonempty spectrum;
-    spectra without a valid CLS produce a zero update. Padding must be finite.
+    Each edge gates ``rank`` message channels rather than one attention
+    logit, and the second term carries pair content even when neighbor
+    singles are identical.
     """
 
     def __init__(
@@ -104,53 +78,61 @@ class PairSummaryToSingleReadout(nnx.Module):
         single_dim: int,
         pair_dim: int,
         *,
-        summary: str = "mean",
-        message_dim: int = 128,
-        residual_scale: float = 0.1,
-        norm_eps: float = 1e-5,
-        compute_dtype: object = jnp.float32,
-        rngs: nnx.Rngs | None = None,
+        rank: int,
+        residual_scale: float,
+        norm_eps: float,
+        compute_dtype: object,
+        rngs: nnx.Rngs,
     ) -> None:
-        if summary not in {"mean", "cls"}:
-            raise ValueError("summary must be 'mean' or 'cls'")
-        if min(single_dim, pair_dim, message_dim) <= 0:
-            raise ValueError("readout dimensions must be positive")
-        rngs = nnx.Rngs(0) if rngs is None else rngs
-        self.summary = summary
         self.compute_dtype = compute_dtype
         self.pair_norm = RMSNorm(pair_dim, eps=norm_eps, affine=False)
-        self.value = Linear(pair_dim * (2 if summary == "cls" else 1), message_dim,
-                            bias=False, compute_dtype=compute_dtype, rngs=rngs)
-        self.out = Linear(message_dim, single_dim, bias=False,
+        self.single_norm = RMSNorm(single_dim, eps=norm_eps, affine=False)
+        self.gate = Linear(pair_dim, rank, compute_dtype=compute_dtype, rngs=rngs)
+        self.value = Linear(single_dim, rank, bias=False,
+                            compute_dtype=compute_dtype, rngs=rngs)
+        self.pair_value = Linear(pair_dim, rank, bias=False,
+                                 compute_dtype=compute_dtype, rngs=rngs)
+        self.out = Linear(rank, single_dim, bias=False,
                           compute_dtype=compute_dtype, rngs=rngs)
         self.output_norm = RMSNorm(single_dim, eps=norm_eps, affine=False)
         self.scale = nnx.Param(jnp.full((single_dim,), residual_scale, jnp.float32))
 
-    def __call__(
+    def __call__(self, single: Array, pair: Array, token_mask: Array) -> Array:
+        keys = token_mask[:, None, :, None]
+        count = jnp.maximum(token_mask.sum(1), 1)[:, None, None].astype(jnp.float32)
+        normalized = self.pair_norm(pair).astype(self.compute_dtype)
+        gates = jax.nn.sigmoid(self.gate(normalized).astype(jnp.float32))
+        values = self.value(self.single_norm(single)).astype(jnp.float32)
+        gated = jnp.sum(jnp.where(keys, gates * values[:, None], 0), axis=2) / count
+        mean_pair = jnp.sum(
+            jnp.where(keys, normalized, 0), axis=2, dtype=jnp.float32,
+        ) / count
+        message = gated + self.pair_value(
+            mean_pair.astype(self.compute_dtype)
+        ).astype(jnp.float32)
+        update = self.output_norm(self.out(message.astype(self.compute_dtype)))
+        return update * self.scale[...].astype(update.dtype) * token_mask[..., None]
+
+
+class PairToSingleBridge(nnx.Module):
+    """Sum of the mean and edge-gated pair->single residual updates."""
+
+    def __init__(
         self,
-        pair: jax.Array,
-        token_mask: jax.Array,
-        cls_mask: jax.Array | None = None,
-    ) -> jax.Array:
-        if self.summary == "mean":
-            # A reduction allows XLA to fuse its broadcast/cast backward pass;
-            # a GEMM formulation can materialize an N-by-N FP32 gradient.
-            pooled = jnp.sum(jnp.where(token_mask[:, None, :, None],
-                                      pair.astype(self.compute_dtype), 0),
-                             axis=2, dtype=jnp.float32)
-            pooled /= jnp.maximum(token_mask.sum(1)[:, None, None], 1)
-            values = self.pair_norm(pooled)
-            output_mask = token_mask
-        else:
-            if cls_mask is None:
-                raise ValueError("CLS readout requires an explicit CLS mask")
-            valid_cls = cls_mask & token_mask
-            index = jnp.argmax(valid_cls, axis=1)
-            batch = jnp.arange(pair.shape[0])
-            # Gather first: normalization never materializes an N-by-N tensor.
-            outgoing = self.pair_norm(pair[batch, :, index, :])
-            incoming = self.pair_norm(pair[batch, index, :, :])
-            values = jnp.concatenate((outgoing, incoming), axis=-1)
-            output_mask = token_mask & valid_cls.any(1)[:, None]
-        update = self.output_norm(self.out(self.value(values)))
-        return update * self.scale[...].astype(update.dtype) * output_mask[..., None]
+        single_dim: int,
+        pair_dim: int,
+        *,
+        rank: int = 64,
+        residual_scale: float = 0.1,
+        norm_eps: float = 1e-5,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs,
+    ) -> None:
+        kwargs = dict(rank=rank, residual_scale=residual_scale, norm_eps=norm_eps,
+                      compute_dtype=compute_dtype, rngs=rngs)
+        self.mean = PairMeanMessage(single_dim, pair_dim, **kwargs)
+        self.gated = EdgeGatedMessage(single_dim, pair_dim, **kwargs)
+
+    def __call__(self, single: Array, pair: Array, token_mask: Array) -> Array:
+        update = self.mean(pair, token_mask) + self.gated(single, pair, token_mask)
+        return update.astype(single.dtype)

@@ -157,6 +157,11 @@ class PeakSetJEPASettings:
     encoder_metadata_schema: str | None = None
     encoder_metadata_conditioning: str = "additive"
     encoder_metadata_condition_dim: int = 256
+    # training_mode="dual": rank of the pair->single bridges added to every
+    # encoder block, and the depth of the pair predictor (None: the masked
+    # latent predictor depth).
+    pair_to_single_rank: int | None = None
+    pair_predictor_num_layers: int | None = None
 
     @classmethod
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":
@@ -206,12 +211,15 @@ def load_frozen_teacher_settings(
 
 
 PAIR_DISTOGRAM_TRAINING_MODE = "pair_distogram"
+# Joint single+pair encoder: MAE on single predictor outputs plus the pair
+# predictor's distogram on the encoder's pair tensor.
+DUAL_TRAINING_MODE = "dual"
 
 
 def encoder_uses_pair_path(settings: PeakSetJEPASettings) -> bool:
     # The pair-branch distogram reads the encoder's pair track, so the pair
     # path is not optional there whatever the config says.
-    if settings.training_mode.lower() == PAIR_DISTOGRAM_TRAINING_MODE:
+    if settings.training_mode.lower() in {PAIR_DISTOGRAM_TRAINING_MODE, DUAL_TRAINING_MODE}:
         return True
     if settings.encoder_use_pair_path is not None:
         return settings.encoder_use_pair_path

@@ -19,6 +19,7 @@ from spectra_learning.models.common_jax import (
     scaled_dot_product_attention,
     silu,
 )
+from spectra_learning.models.pair_to_single_jax import PairToSingleBridge
 from spectra_learning.models.peak_features_jax import FourierFeatures, MzTokenEmbedding
 from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForward
 
@@ -1163,10 +1164,13 @@ class PairMixerBlock(nnx.Module):
         use_fastmixer: bool = False,
         fastmixer_max_visible_tokens: int | None = None,
         transition_type: str = "swiglu",
+        pair_to_single_rank: int | None = None,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
+        if pair_to_single_rank is not None and not use_fastmixer:
+            raise ValueError("pair->single bridges require the fastmixer block")
         self.dropout = dropout
         self.use_single_to_pair_update = use_single_to_pair_update
         self.use_fastmixer = use_fastmixer
@@ -1236,6 +1240,20 @@ class PairMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.single_transition_post_norm = RMSNorm(single_dim, eps=norm_eps)
+        # Built after the block's own layers so their initialization does not
+        # depend on whether the bridge exists.
+        self.pair_to_single = (
+            PairToSingleBridge(
+                single_dim,
+                pair_dim,
+                rank=pair_to_single_rank,
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            if pair_to_single_rank is not None
+            else None
+        )
 
     def __call__(
         self,
@@ -1374,6 +1392,12 @@ class PairMixerBlock(nnx.Module):
                 self.single_transition_norm(single),
             )
         )
+        if self.pair_to_single is not None:
+            update = self.pair_to_single(
+                _gather_single(single, idx), pair_compact, compact_token_mask
+            )
+            batch_idx = jnp.arange(single.shape[0])[:, None]
+            single = single.at[batch_idx, idx].add(update)
         return single, pair_compact
 
     def fastmixer_compact_only_call(
@@ -1439,6 +1463,10 @@ class PairMixerBlock(nnx.Module):
         single_compact = single_compact * compact_token_mask[..., None].astype(
             single_compact.dtype
         )
+        if self.pair_to_single is not None:
+            single_compact = single_compact + self.pair_to_single(
+                single_compact, pair_compact, compact_token_mask
+            )
         return single_compact, pair_compact
 
     def _fast_triangle_update(
