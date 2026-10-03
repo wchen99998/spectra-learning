@@ -115,10 +115,13 @@ def build_jax_checkpoint_manager(
     checkpoint_dir: StoragePath,
     *,
     max_to_keep: int | None = 5,
+    keep_period: int | None = None,
     enable_async_checkpointing: bool = True,
 ) -> ocp.CheckpointManager:
     options = ocp.CheckpointManagerOptions(
         max_to_keep=max_to_keep,
+        # Steps divisible by keep_period survive max_to_keep garbage collection.
+        keep_period=keep_period,
         enable_async_checkpointing=enable_async_checkpointing,
     )
     return ocp.CheckpointManager(jax_checkpoint_dir(checkpoint_dir), options=options)
@@ -187,6 +190,7 @@ def restore_frozen_teacher_encoder(
     teacher_state: nnx.State,
     *,
     path_renames: dict[str, str] | None = None,
+    source_module: str = "encoder",
 ) -> nnx.State:
     state_path = storage_join(checkpoint_path, "state")
     with ocp.StandardCheckpointer() as checkpointer:
@@ -196,9 +200,12 @@ def restore_frozen_teacher_encoder(
         tuple(str(part) for part in path): (path, value)
         for path, value in nnx.to_flat_state(teacher_state)
     }
+    # Periodic-teacher checkpoints keep the frozen teacher under
+    # static_state.teacher_encoder only.
     source_metadata = {
-        root: flatten_dict(metadata[root]["encoder"])
+        root: flatten_dict(metadata[root][source_module])
         for root in ("trainable_params", "static_state")
+        if source_module in metadata[root]
     }
 
     def target_path(path: tuple[Any, ...]) -> tuple[str, ...]:
@@ -268,8 +275,8 @@ def restore_frozen_teacher_encoder(
                 global_shape=leaf_metadata.shape,
                 dtype=value.dtype,
             )
-        target[root] = {"encoder": unflatten_dict(target_leaves)}
-        restore_args[root] = {"encoder": unflatten_dict(restore_arg_leaves)}
+        target[root] = {source_module: unflatten_dict(target_leaves)}
+        restore_args[root] = {source_module: unflatten_dict(restore_arg_leaves)}
 
     with ocp.PyTreeCheckpointer() as checkpointer:
         restored = checkpointer.restore(
@@ -282,8 +289,8 @@ def restore_frozen_teacher_encoder(
         )
 
     restored_source_values = {}
-    for root in ("trainable_params", "static_state"):
-        for source_path, value in flatten_dict(restored[root]["encoder"]).items():
+    for root in source_metadata:
+        for source_path, value in flatten_dict(restored[root][source_module]).items():
             restored_source_values[target_path(source_path)] = value
     restored_values = {
         path: (
@@ -305,8 +312,14 @@ def restore_frozen_teacher_encoder(
 def restore_jax_encoder_state(
     checkpoint_path: StoragePath,
     encoder_state: nnx.State,
+    *,
+    source_module: str = "encoder",
 ) -> nnx.State:
-    return restore_frozen_teacher_encoder(checkpoint_path, encoder_state)
+    return restore_frozen_teacher_encoder(
+        checkpoint_path,
+        encoder_state,
+        source_module=source_module,
+    )
 
 
 def torch_encoder_state_dict_from_jax(

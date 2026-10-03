@@ -1135,7 +1135,7 @@ def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_jax_checkpoint_manager",
-        lambda checkpoint_dir, *, max_to_keep, enable_async_checkpointing: (
+        lambda checkpoint_dir, *, max_to_keep, keep_period, enable_async_checkpointing: (
             checkpoint_manager
         ),
     )
@@ -1255,7 +1255,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_jax_checkpoint_manager",
-        lambda checkpoint_dir, *, max_to_keep, enable_async_checkpointing: (
+        lambda checkpoint_dir, *, max_to_keep, keep_period, enable_async_checkpointing: (
             _FakeCheckpointManager()
         ),
     )

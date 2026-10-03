@@ -1155,9 +1155,10 @@ def _train_and_evaluate_jax_task(
     _validate_jax_task_probe_config(config, task)
     if is_main_process:
         save_config(config, workdir)
+    # SPECTRA_GEMS_WORLD_SIZE lets one dev host stand in for one host of a pod.
     datamodule = task.build_datamodule(
         config,
-        jax.process_count(),
+        int(os.environ.get("SPECTRA_GEMS_WORLD_SIZE", jax.process_count())),
         int(os.environ.get("SPECTRA_GEMS_RANK", jax.process_index())),
     )
     total_steps = total_training_steps(config, datamodule)
@@ -1173,6 +1174,7 @@ def _train_and_evaluate_jax_task(
     checkpoint_manager = build_jax_checkpoint_manager(
         checkpoint_dir,
         max_to_keep=jax_checkpoint_max_to_keep,
+        keep_period=config.get("jax_checkpoint_keep_period", None),
         enable_async_checkpointing=bool(
             config.get("jax_enable_async_checkpointing", True)
         ),

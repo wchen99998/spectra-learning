@@ -581,8 +581,10 @@ class PeakSetEncoder(nnx.Module):
         token_visible_mask: Array,
         token_positions: Array | None = None,
         condition: Array | None = None,
+        num_blocks: int | None = None,
     ) -> Array:
-        for block_idx, block in enumerate(self.blocks, start=1):
+        blocks = self.blocks if num_blocks is None else self.blocks[:num_blocks]
+        for block_idx, block in enumerate(blocks, start=1):
             if should_activation_checkpoint(
                 mode=self.activation_checkpoint_mode,
                 modules=self.activation_checkpoint_modules,
@@ -687,8 +689,13 @@ class PeakSetEncoder(nnx.Module):
         visible_mask: Array | None = None,
         precursor_mz: Array | None = None,
         spectrum_metadata: Array | None = None,
+        num_blocks: int | None = None,
     ) -> Array:
+        """Encodes all tokens; with ``num_blocks`` returns that block's raw
+        residual stream instead of the final normed output."""
         if self.use_pair_path:
+            if num_blocks is not None:
+                raise ValueError("num_blocks is only supported without the pair path")
             output, _ = self.forward_with_pair(
                 peak_mz,
                 peak_intensity,
@@ -714,7 +721,10 @@ class PeakSetEncoder(nnx.Module):
             output,
             token_visible_mask,
             condition=metadata_embedding,
+            num_blocks=num_blocks,
         )
+        if num_blocks is not None:
+            return output
         return self._finalize(output, metadata_embedding)
 
     def load_torch_state_dict(
