@@ -48,10 +48,17 @@ def test_selected_stage_settings(input_paths, stage):
     ("head", ["--head-checkpoint", "source.msgpack"], "only used by joint"),
     ("eval", ["--resume"], "loads best.msgpack"),
     ("head", ["--session-hours", "nan"], "finite and nonnegative"),
+    ("train", ["--negatives", "24"], "cached-token head training only"),
 ])
 def test_stage_lifecycle_arguments_reject_ambiguity(input_paths, stage, extra, message):
     with pytest.raises(ValueError, match=message):
         args_for(input_paths, stage, *extra)
+
+
+def test_negatives_scale_packed_graph_capacity(input_paths):
+    default, wider = args_for(input_paths, "head"), args_for(input_paths, "head", "--negatives", "26")
+    assert (default.negatives, default.node_capacity, default.edge_capacity) == (8, 65536, 147456)
+    assert (wider.negatives, wider.node_capacity, wider.edge_capacity) == (26, 3 * 65536, 3 * 147456)
 
 
 def test_resume_joint_does_not_require_source_head(input_paths):
@@ -266,15 +273,19 @@ def test_checkpoint_preserves_model_statistics_optimizer_and_training_key(tmp_pa
     assert not path.with_suffix(".msgpack.partial").exists()
 
 
-@pytest.mark.parametrize("stage,adaptation", [("head", "full"), ("train", "full"),
-                                             ("train", "lora"), ("train", "frozen")])
-def test_main_real_head_update_session_resume_matches_uninterrupted_training(input_paths, monkeypatch, stage, adaptation):
+@pytest.mark.parametrize("stage,adaptation,extra", [
+    ("head", "full", {}), ("train", "full", {}), ("train", "lora", {}), ("train", "frozen", {}),
+    ("head", "full", {"peak_readout": "attention"}), ("head", "full", {"global_term": True}),
+    ("head", "full", {"aux_spectrum": True}), ("train", "full", {"aux_spectrum": True}),
+])
+def test_main_real_head_update_session_resume_matches_uninterrupted_training(input_paths, monkeypatch, stage, adaptation, extra):
     """Exercise main's initialization, actual gradients, saves and resumed RNGs."""
     from atom_flare_data import build_graph_store
     from glacier_fragment_data import build_fragment_store
 
     args = args_for(input_paths, stage)
     args.encoder_adaptation = adaptation
+    args.__dict__.update({k: v for k, v in extra.items() if k != "aux_spectrum"})
     args.__dict__.update(d=8, hidden=8, batch=4, negatives=1, atom_cap=8,
                          node_capacity=64, edge_capacity=128, eval_batch=4,
                          eval_chunk=2, candidate_cap=4, score_chunk=2,
@@ -322,6 +333,14 @@ def test_main_real_head_update_session_resume_matches_uninterrupted_training(inp
     fractions = {"fraction": np.tile(np.array([.25, .5, 1], np.float32), (6, 1)),
                  "mz": np.tile(np.array([20., 30., 45.], np.float32), (6, 1)),
                  "eligible": np.ones(6, bool), "adduct_mass": np.full(6, 1.0072764, np.float32)}
+    if extra.get("aux_spectrum"):
+        args.aux_spectrum = input_paths.parent / "aux"
+        args.aux_spectrum.mkdir()
+        aux = np.random.default_rng(9).normal(size=(6, 5)).astype(np.float16)
+        np.save(args.aux_spectrum / "features.f16.npy", aux)
+        np.save(args.aux_spectrum / "available.npy", np.array([True, False, True, True, True, True]))
+        (args.aux_spectrum / "metadata.json").write_text('{"source": "fixture"}')
+        fractions.update(aux=aux, aux_valid=np.array([True, False, True, True, True, True]))
     candidates = {s: np.arange(4, dtype=np.int32) for s in store.smiles}
     bank = [np.array([g for g in range(4) if g != truth], np.int32) for truth in truth_ids]
     peak_input = {"kind": "raw", "embedding_metadata": {"checkpoint": "fixture"}}
@@ -352,6 +371,11 @@ def test_main_real_head_update_session_resume_matches_uninterrupted_training(inp
         moments = jax.tree.leaves(first_state["opt_state"]["0"]["mu"][group])
         assert all(np.isfinite(value).all() for value in moments)
         assert any(np.any(value != 0) for value in moments)
+    if extra.get("aux_spectrum"):
+        aux_moments = first_state["opt_state"]["0"]["mu"]["agreement"]["aux"]
+        assert np.any(aux_moments["weight"] != 0)
+        manifest = json.loads((args.out / "manifest.json").read_text())
+        assert manifest["input_identity"]["aux_spectrum"]["metadata"] == {"source": "fixture"}
     if stage == "train":
         for group in ("encoder", "readout"):
             moments = jax.tree.leaves(first_state["opt_state"]["0"]["mu"]["peak"][group])

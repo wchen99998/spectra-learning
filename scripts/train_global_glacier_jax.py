@@ -2,6 +2,7 @@
 
 from functools import partial
 
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 import optax
@@ -26,6 +27,48 @@ def scale_by_group_learning_rate(jepa_lr: float, head_lr: float) -> optax.Gradie
     return optax.GradientTransformation(init_fn, update_fn)
 
 
+def init_global_term(dim: int) -> dict:
+    """Zero-weight global spectrum-molecule term: the initial score equals the baseline."""
+    eye = jnp.eye(dim, dtype=jnp.float32)
+    return {"query": eye, "key": eye, "weight": jnp.float32(0.0)}
+
+
+def global_vectors(G, P, pmask, Z, fmask, gate):
+    """Unit spectrum vector [..., d] and gate-weighted unit molecule vectors [..., C, d]."""
+    spectrum = jnp.where(pmask[..., None], P.astype(jnp.float32), 0.0).sum(-2)
+    spectrum = core.normalize(spectrum @ G["query"])
+    weights = jax.nn.softmax(jnp.where(fmask, gate, -1e9), axis=-1) * fmask
+    molecule = core.normalize((weights[..., None] * Z.astype(jnp.float32)).sum(-2) @ G["key"])
+    return spectrum, molecule
+
+
+class AuxSpectrumEncoder(nn.Module):
+    """Per-spectrum external embedding (e.g. a precomputed second spectrum encoder) -> unit [d]."""
+
+    dim: int = 256
+    hidden: int = 496
+    dropout: float = 0.1
+
+    @nn.compact
+    def __call__(self, features: jax.Array, *, train: bool = False) -> jax.Array:
+        x = nn.LayerNorm(epsilon=1e-5, use_fast_variance=False, name="norm")(features.astype(jnp.float32))
+        x = jax.nn.gelu(core.Linear(self.hidden, name="linear1")(x), approximate=False)
+        x = nn.Dropout(self.dropout)(x, deterministic=not train)
+        return core.normalize(core.Linear(self.dim, name="linear2")(x))
+
+
+def init_aux_term(key, features: int, dim: int, dropout: float) -> dict:
+    """Zero-weight auxiliary spectrum-molecule term: the initial score equals the baseline."""
+    encoder = AuxSpectrumEncoder(dim, dropout=dropout).init(key, jnp.zeros((1, features)))["params"]
+    return {"encoder": encoder, "key": jnp.eye(dim, dtype=jnp.float32), "weight": jnp.float32(0.0)}
+
+
+def aux_molecule_vectors(A, Z, fmask, gate):
+    """Gate-weighted unit molecule vectors [..., d] for the auxiliary term."""
+    weights = jax.nn.softmax(jnp.where(fmask, gate, -1e9), axis=-1) * fmask
+    return core.normalize((weights[..., None] * Z.astype(jnp.float32)).sum(-2) @ A["key"])
+
+
 def functions(args):
     if args.train_jepa:
         from trainable_jepa_peak import restore_peak
@@ -33,6 +76,10 @@ def functions(args):
         peak = restore_peak(args)
     else:
         peak = core.PeakEncoder(args.d, args.dropout)
+        if getattr(args, "peak_readout", "mlp") == "attention":
+            from spectra_learning.probes.massspec.peak_readout_jax import AttentionPeakReadout
+            peak = AttentionPeakReadout(args.d, dropout=args.dropout)
+    masked_readout = getattr(args, "peak_readout", "mlp") == "attention"
     # Frozen base weights are explicit JIT arguments, not multi-GB HLO constants
     # or optimizer leaves. The existing full-adaptation path keeps its signature.
     frozen_peak = None
@@ -49,10 +96,18 @@ def functions(args):
         )
     else:
         optimizer = optax.adam(args.lr, b1=0.9, b2=0.999, eps=1e-8, eps_root=0.0)
+    if getattr(args, "weight_decay", 0.):
+        # Decay weight matrices only; scalar physical widths and biases keep their values.
+        optimizer = optax.adamw(args.lr, b1=0.9, b2=0.999, eps=1e-8, weight_decay=args.weight_decay,
+                                mask=lambda params: jax.tree.map(lambda x: x.ndim >= 2, params))
+
+    aux_encoder = AuxSpectrumEncoder(args.d, dropout=args.dropout)
 
     def loss_fn(params, stats, graph, tokens, pmask, fractions, ik, hn_idx, hn_valid, key, frozen):
-        peak_key, gnn_key = jax.random.split(key)
+        peak_key, gnn_key, aux_key = jax.random.split(key, 3)
         extras = {"frozen": frozen} if args.train_jepa else {}
+        if masked_readout:
+            extras["mask"] = pmask
         P = peak.apply({"params": params["peak"]}, tokens, train=True, rngs={"dropout": peak_key}, **extras)
         (Z, gate), updated = gnn.apply(
             {"params": params["gnn"], "batch_stats": stats}, graph, train=True,
@@ -75,6 +130,19 @@ def functions(args):
             agree["log_sigma"], agree["log_beta"], chunk_size=args.score_chunk,
             cross_attention=agree["cross_attention"],
         )
+        if "global" in agree:
+            G = agree["global"]
+            spectrum, molecule = global_vectors(G, P, pmask, Z, fmask, gate)
+            score = score + G["weight"] * spectrum @ molecule[:B].T
+            negative_scores = negative_scores + G["weight"] * jnp.einsum("bd,bkd->bk", spectrum, molecule[hn_idx])
+        if "aux" in agree:
+            A = agree["aux"]
+            spectrum = aux_encoder.apply({"params": A["encoder"]}, fractions["aux"], train=True,
+                                         rngs={"dropout": aux_key})
+            spectrum = jnp.where(fractions["aux_valid"][:, None], spectrum, 0.0)
+            molecule = aux_molecule_vectors(A, Z, fmask, gate)
+            score = score + A["weight"] * spectrum @ molecule[:B].T
+            negative_scores = negative_scores + A["weight"] * jnp.einsum("bd,bkd->bk", spectrum, molecule[hn_idx])
         return core.info_nce(score, ik, args.tau, negative_scores, hn_valid), updated["batch_stats"]
 
     @partial(jax.jit, donate_argnums=(0, 2) if args.train_jepa else ())
@@ -96,20 +164,32 @@ def functions(args):
         return Z.astype(jnp.float16), gate
 
     @jax.jit
-    def compiled_encode_peaks(params, tokens, score_params, frozen):
+    def compiled_encode_peaks(params, tokens, score_params, frozen, mask):
         extras = {"frozen": frozen} if args.train_jepa else {}
+        if masked_readout:
+            extras["mask"] = mask
         P = peak.apply({"params": params}, tokens, train=False, **extras)
         P = compatibility.apply({"params": score_params}, P, method=compatibility.project_queries)
         return P.astype(jnp.float16)
 
-    def encode_peaks(params, tokens, score_params):
-        return compiled_encode_peaks(params, tokens, score_params, frozen_peak)
+    def encode_peaks(params, tokens, score_params, mask=None):
+        return compiled_encode_peaks(params, tokens, score_params, frozen_peak,
+                                     mask if masked_readout else None)
 
     @jax.jit
     def query_score(params, P, pmask, Z, fmask, fp, ff, gate):
-        return scoring.score_query(
+        scores = scoring.score_query(
             P.astype(jnp.float32), pmask, Z.astype(jnp.float32), fmask, gate, fp, ff,
             params["log_sigma"], params["log_beta"], cross_attention=params["cross_attention"],
         )
+        if "global" in params:
+            spectrum, molecule = global_vectors(params["global"], P, pmask, Z, fmask, gate)
+            scores = scores + params["global"]["weight"] * molecule @ spectrum
+        if "aux" in params:
+            A = params["aux"]
+            spectrum = aux_encoder.apply({"params": A["encoder"]}, fp["aux"][None], train=False)[0]
+            spectrum = jnp.where(fp["aux_valid"], spectrum, 0.0)
+            scores = scores + A["weight"] * aux_molecule_vectors(A, Z, fmask, gate) @ spectrum
+        return scores
 
     return peak, gnn, agreement, optimizer, train_step, encode_molecules, encode_peaks, query_score

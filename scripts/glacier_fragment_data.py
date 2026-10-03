@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from rdkit import Chem
 
-from atom_flare_data import GraphStore, H_MONO
+from atom_flare_data import GraphStore, H_MONO, concatenated_ranges
 
 
 SCHEMA = "glacier_fragments_original_order_v1"
@@ -323,25 +323,24 @@ def batch_fragments(
         "fragment_log_n_atoms": np.zeros(shape, np.float32),
         "fragment_intensity": np.zeros(shape, np.float32),
     }
-    for slot, graph_id in enumerate(ids):
-        lo, hi = store.frag_off[graph_id:graph_id + 2]
-        count = int(hi - lo)
-        result["fragment_mask"][slot, :count] = True
-        result["fragment_n_cuts"][slot, :count] = store.n_cuts[lo:hi]
-        result["fragment_kind"][slot, :count] = store.kind[lo:hi]
-        result["fragment_mass_frac"][slot, :count] = store.mass_frac[lo:hi]
-        result["fragment_log_n_atoms"][slot, :count] = np.log(store.n_atoms[lo:hi].astype(np.float32))
-        result["fragment_intensity"][slot, :count] = store.inten[lo:hi]
-        offsets = store.mem_off[lo:hi + 1]
-        lengths = np.diff(offsets)
-        rows = np.repeat(np.arange(count), lengths)
-        members = store.atoms[offsets[0]:offsets[-1]]
-        result["member_mean"][slot, rows, members] = np.repeat(1.0 / lengths, lengths)
-        offsets = store.bnd_off[lo:hi + 1]
-        lengths = np.diff(offsets)
-        rows = np.repeat(np.arange(count), lengths)
-        members = store.bnd_atoms[offsets[0]:offsets[-1]]
-        result["boundary_mean"][slot, rows, members] = np.repeat(1.0 / np.maximum(lengths, 1), lengths)
+    lo = store.frag_off[ids].astype(np.int64)
+    counts = (store.frag_off[ids + 1] - store.frag_off[ids]).astype(np.int64)
+    fragments = concatenated_ranges(lo, counts)
+    slot = np.repeat(np.arange(len(ids)), counts)
+    position = np.arange(len(fragments)) - np.repeat(np.cumsum(counts) - counts, counts)
+    result["fragment_mask"][slot, position] = True
+    result["fragment_n_cuts"][slot, position] = store.n_cuts[fragments]
+    result["fragment_kind"][slot, position] = store.kind[fragments]
+    result["fragment_mass_frac"][slot, position] = store.mass_frac[fragments]
+    result["fragment_log_n_atoms"][slot, position] = np.log(store.n_atoms[fragments].astype(np.float32))
+    result["fragment_intensity"][slot, position] = store.inten[fragments]
+    for name, offsets, atoms in (("member_mean", store.mem_off, store.atoms),
+                                 ("boundary_mean", store.bnd_off, store.bnd_atoms)):
+        start = offsets[fragments].astype(np.int64)
+        lengths = offsets[fragments + 1].astype(np.int64) - start
+        members = atoms[concatenated_ranges(start, lengths)]
+        weight = (1.0 / np.maximum(lengths, 1)).astype(np.float32)
+        result[name][np.repeat(slot, lengths), np.repeat(position, lengths), members] = np.repeat(weight, lengths)
     return result
 
 

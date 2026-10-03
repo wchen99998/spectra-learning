@@ -308,22 +308,35 @@ def batch_graphs(
         "afrac": np.full((graph_capacity, atom_cap, FRACTION_SLOTS), -1, np.float32),
         "n_node": np.zeros(graph_capacity, np.int32),
     }
-    npos, epos = 0, 0
-    for slot, index in enumerate(ids):
-        lo, hi = store.node_offsets[index:index + 2]
-        elo, ehi = store.edge_offsets[index:index + 2]
-        n, e = int(hi - lo), int(ehi - elo)
-        result["nodes"][npos:npos + n] = store.nodes[lo:hi]
-        result["edges"][epos:epos + e] = store.edges[elo:ehi]
-        result["senders"][epos:epos + e] = store.senders[elo:ehi].astype(np.int32) + npos
-        result["receivers"][epos:epos + e] = store.receivers[elo:ehi].astype(np.int32) + npos
-        result["node_mask"][npos:npos + n] = True
-        result["edge_mask"][epos:epos + e] = True
-        result["graph_idx"][npos:npos + n] = slot
-        result["node_slots"][npos:npos + n] = np.arange(n)
-        result["atom_mask"][slot, :n] = True
-        result["afrac"][slot, :n] = store.afrac[lo:hi]
-        result["n_node"][slot] = n
-        npos += n
-        epos += e
+    node_lo = store.node_offsets[ids].astype(np.int64)
+    edge_lo = store.edge_offsets[ids].astype(np.int64)
+    counts, edge_counts = counts.astype(np.int64), edge_counts.astype(np.int64)
+    n_total, e_total = int(counts.sum()), int(edge_counts.sum())
+    node_start = np.cumsum(counts) - counts  # packed position of each graph's first node
+    node_src = concatenated_ranges(node_lo, counts)
+    edge_src = concatenated_ranges(edge_lo, edge_counts)
+    node_graph = np.repeat(np.arange(len(ids)), counts)
+    node_slot = np.arange(n_total) - np.repeat(node_start, counts)
+    edge_shift = np.repeat(node_start, edge_counts).astype(np.int32)
+    result["nodes"][:n_total] = store.nodes[node_src]
+    result["edges"][:e_total] = store.edges[edge_src]
+    result["senders"][:e_total] = store.senders[edge_src].astype(np.int32) + edge_shift
+    result["receivers"][:e_total] = store.receivers[edge_src].astype(np.int32) + edge_shift
+    result["node_mask"][:n_total] = True
+    result["edge_mask"][:e_total] = True
+    result["graph_idx"][:n_total] = node_graph
+    result["node_slots"][:n_total] = node_slot
+    result["atom_mask"][node_graph, node_slot] = True
+    result["afrac"][node_graph, node_slot] = store.afrac[node_src]
+    result["n_node"][:len(ids)] = counts
     return result
+
+
+def concatenated_ranges(starts: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    """Concatenate range(start, start + length) for each pair, without a Python loop."""
+    lengths = np.asarray(lengths, np.int64)
+    total = int(lengths.sum())
+    if total == 0:
+        return np.zeros(0, np.int64)
+    offsets = np.cumsum(lengths) - lengths
+    return np.repeat(np.asarray(starts, np.int64) - offsets, lengths) + np.arange(total)

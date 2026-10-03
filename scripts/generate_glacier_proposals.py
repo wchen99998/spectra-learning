@@ -214,7 +214,11 @@ def generate(args: argparse.Namespace, commit: Callable[[], None] | None = None)
     if graph_meta["smiles_sha256"] != fingerprint:
         raise ValueError("Graph-store SMILES do not match their metadata fingerprint")
     count = len(smiles)
-    if args.limit:
+    if args.ids:
+        selected = np.unique(np.load(args.ids)).astype(np.int32)
+        if selected.min() < 0 or selected.max() >= count:
+            raise ValueError("Selected graph IDs lie outside the graph store")
+    elif args.limit:
         selected = np.sort(np.random.default_rng(args.seed).choice(
             count, min(args.limit, count), replace=False,
         )).astype(np.int32)
@@ -226,7 +230,8 @@ def generate(args: argparse.Namespace, commit: Callable[[], None] | None = None)
         "checkpoint_sha256": checkpoint_hash, "smiles_sha256": fingerprint,
         "molecules": count, "selected_molecules": len(selected),
         "selection_seed": args.seed, "selection_limit": args.limit,
-        "collision_energies": list(ENERGIES), "adduct": "[M+H]+", "instrument": "Orbitrap",
+        "collision_energies": list(ENERGIES), "adduct": args.adduct, "instrument": args.instrument,
+        **({"selection_ids_sha256": sha256(Path(args.ids).read_bytes()).hexdigest()} if args.ids else {}),
         "precision": "float32",
         "atom_order": "Chem.MolFromSmiles(original_graph_store_smiles)",
         "aggregation": "union atom sets; maximum predicted intensity over shifts and energies",
@@ -273,7 +278,7 @@ def generate(args: argparse.Namespace, commit: Callable[[], None] | None = None)
                               "total": len(remaining), "seconds": time.monotonic() - start}), flush=True)
     # Keep all three energies adjacent, while grouping similarly sized graphs.
     ordered = sorted(canonical, key=lambda i: (len(mapping[i]), canonical[i], i))
-    entries = [(canonical[i], str(i), energy, "[M+H]+", "Orbitrap", "")
+    entries = [(canonical[i], str(i), energy, args.adduct, args.instrument, "")
                for i in ordered for energy in ENERGIES]
     metadata["unsupported_graph_ids"] = sorted(set(metadata["unsupported_graph_ids"]) | set(unsupported))
     _write_json(metadata_path, metadata)
@@ -385,6 +390,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--workers", type=int, default=4)
     result.add_argument("--shard-size", type=int, default=1024)
     result.add_argument("--limit", type=int, default=0)
+    result.add_argument("--ids", default="", help="npy of graph IDs to generate (overrides --limit)")
+    result.add_argument("--adduct", default="[M+H]+")
+    result.add_argument("--instrument", default="Orbitrap")
     result.add_argument("--seed", type=int, default=0)
     result.add_argument("--max-runtime-seconds", type=float, default=0)
     return result
