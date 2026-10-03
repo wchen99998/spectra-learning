@@ -100,3 +100,6 @@ docs/tpu7x_mig_dws_investigation.md
 !/presentations/diffusion_chemistry/research/report_plan.json
 !/presentations/diffusion_chemistry/research/evidence_index.json
 !/presentations/diffusion_chemistry/research/presentation_audit.json
+
+# Measured inputs for the MIST-modality retrieval deck.
+!/presentations/mist_modality/research/*.json

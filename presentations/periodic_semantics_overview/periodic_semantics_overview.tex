@@ -1,27 +1,38 @@
 \documentclass[aspectratio=169,11pt]{beamer}
 \usepackage{presentation-theme}
 \input{../periodic_semantics/research/numbers.tex}
-\hypersetup{pdftitle={Periodic teacher promotion: findings in five slides},pdfauthor={Wuhao}}
+\hypersetup{pdftitle={Periodic teacher promotion: findings in six slides},pdfauthor={Wuhao}}
 \newcommand{\bodytext}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm,font=\figurefont\fontsize{11}{14}\selectfont] at (#1,#2) {#4};}
 \newcommand{\plotfigure}[1]{\node[anchor=north,inner sep=0] at (8,6.78) {\includegraphics[width=14.3cm,height=4.75cm,keepaspectratio]{../periodic_semantics/figures/#1_slide.pdf}};}
 \begin{document}
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{RESEARCH FINDINGS / 29 SEP 2026}{Promotion did not broadly improve chemical semantics}
-\bodytext{1.0}{6.35}{13.7}{After \textbf{24 student-to-teacher promotions}, global chemical similarity and peak-dropout robustness improve. Chemical probes, local neighbors and repeat-spectrum retrieval worsen.}
-\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{36}{40}\selectfont] at (1.0,4.3) {\InitialAUC\ \(\rightarrow\) \LatestAUC};
-\bodytext{1.0}{2.9}{13.6}{Final-mean MACCS macro AUROC\\Initial teacher \(\rightarrow\) periodic student, step 1,209,000}
-\takeaway{A useful embedding exists; automatic semantic improvement from promotion is not supported.}
-\source{Fresh frozen-encoder audit: 231,104 spectra, 28,929 molecules. Chemical probes use 22,746 / 3,185 / 2,998 train / validation / test molecule centroids.}
+\header{RESEARCH FINDINGS / 29 SEP 2026}{Measure all four checkpoints with the same protocol}
+\foreach \x/\name/\value in {2.3/{Original MAE\\666k}/\MaeAUC,6.1/{JEPA initial teacher\\1,190k}/\InitialAUC,9.9/{Periodic teacher\\1,200k}/\PromotedAUC,13.7/{Periodic student\\1,209k}/\LatestAUC}{
+  \diagramblock{\x}{5.75}{3.0}{1.0}{\name}
+  \node[font=\brandmedium\fontsize{27}{30}\selectfont] at (\x,4.3) {\value};
+}
+\bodytext{1.0}{3.25}{13.7}{Final-mean MACCS macro AUROC. The MAE trained the initial JEPA teacher; the periodic student started fresh and underwent 24 promotions.}
+\takeaway{Chemical readouts improve from MAE to initial JEPA, then decline below MAE at the periodic endpoint.}
+\source{Same frozen-encoder audit for each state: 231,104 spectra, 28,929 molecules. Ridge penalties selected on validation; 2,998 test molecules. Steps refer to separate training runs.}
 \end{tikzpicture}
 \end{frame}
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{01 / CHEMICAL INFORMATION}{The initial teacher remains the stronger chemical readout}
+\header{TRAINING / TWO RUNS}{The loss stays the same; the teacher update changes}
+\node[anchor=north,inner sep=0] at (8,6.82) {\includegraphics[width=14.5cm,height=4.85cm,keepaspectratio]{../periodic_semantics/figures/training_schemes_slide.pdf}};
+\takeaway{Black: forward computation. Teal dashed: gradient updates. Ochre dashed: encoder weight copies.}
+\source{Both runs: full-spectrum teacher; random 60\% context and 25\% target positions; latent MSE. Token counts are schematic. Teacher targets are detached; periodic copies preserve student and optimizer state.}
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{01 / CHEMICAL INFORMATION}{Chemical probes compare MAE, initial JEPA and periodic states}
 \plotfigure{chemical_probes}
 \takeaway{The comparison balances by molecule and chooses ridge penalties using validation data only.}
-\source{Three exact states: initial JEPA teacher at 1,190,000; promoted teacher at periodic step 1,200,000; latest student at 1,209,000. Seven property targets and 15 functional groups.}
+\source{Four states: original MAE 666k; initial JEPA teacher 1,190k; periodic teacher 1,200k; periodic student 1,209k. Seven property targets and 15 functional groups.}
 \end{tikzpicture}
 \end{frame}
 
@@ -36,9 +47,9 @@
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{03 / PRECISION}{The main differences survive paired molecule resampling}
+\header{03 / PRECISION}{Separate both transitions and the endpoint versus MAE}
 \plotfigure{paired_uncertainty}
-\takeaway{These intervals quantify held-out molecule sampling, not uncertainty across training runs.}
+\takeaway{JEPA improves probes over MAE; periodic training ends with weaker probes and raw neighbors than MAE.}
 \source{95\% paired percentile intervals. 500 bootstrap resamples for AUROC; 2,000 for nearest-neighbor Tanimoto. Single pretraining seed; secondary measures are exploratory.}
 \end{tikzpicture}
 \end{frame}
@@ -47,10 +58,10 @@
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{04 / INTERPRETATION}{Promotion is a training rule, not a semantic guarantee}
 \bodytext{1.0}{6.5}{13.5}{\textbf{Plausible mechanism}\\Promotion can change which predictable signals the next generation learns.}
-\bodytext{1.0}{4.95}{13.5}{\textbf{Measured result}\\Chemistry survives. Global ordering and dropout robustness improve; chemical readouts and local neighborhoods worsen.}
+\bodytext{1.0}{4.95}{13.5}{\textbf{Measured result}\\MAE to initial JEPA improves chemical probes; the periodic endpoint falls below both. Repeat-spectrum retrieval declines across all three stages.}
 \bodytext{1.0}{3.25}{13.5}{\textbf{Decisive follow-up}\\Compare never-promoted and periodic teachers with matched student seeds, batches, masks, optimizer and training budget.}
 \takeaway{Keep the hypothesis conditional; run the matched control before crediting or blaming promotion.}
-\source{Full 21-slide report, speaker notes, experiment code, raw predictions and vector figure sources accompany this overview. No matched never-promoted experiment was run in this audit.}
+\source{Full 22-slide report, speaker notes, experiment code, raw predictions and vector figure sources accompany this overview. No matched never-promoted experiment was run in this audit.}
 \end{tikzpicture}
 \end{frame}
 \end{document}

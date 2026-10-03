@@ -1,0 +1,34 @@
+{
+  "n": 17556,
+  "weight": 0.9,
+  "base_hit1": 0.4410457963089542,
+  "mist_hit1": 0.4913989519252677,
+  "fused_hit1": 0.6152312599681021,
+  "oracle_either_hit1": 0.685064935064935,
+  "cells": {
+    "base_hit__mist_hit": {
+      "n": 4343,
+      "fused_hit": 4343
+    },
+    "base_hit__mist_miss": {
+      "n": 3400,
+      "fused_hit": 2513
+    },
+    "base_miss__mist_hit": {
+      "n": 4284,
+      "fused_hit": 3195
+    },
+    "base_miss__mist_miss": {
+      "n": 5529,
+      "fused_hit": 750
+    }
+  },
+  "pool_size_quantiles": [
+    1.0,
+    58.0,
+    237.0,
+    256.0,
+    256.0
+  ],
+  "candidate_pairs": 2909859
+}

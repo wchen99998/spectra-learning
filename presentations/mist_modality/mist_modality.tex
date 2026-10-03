@@ -1,0 +1,333 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage{presentation-theme}
+\title{A second spectrum view: FRIGID's MIST for molecular retrieval}
+\author{Wuhao}
+\hypersetup{pdftitle={A second spectrum view: FRIGID's MIST for molecular retrieval},
+  pdfauthor={Wuhao},pdfsubject={MIST late fusion and trained-in auxiliary modality on the 44.10 percent retrieval model, 2 October 2026}}
+\definecolor{teal}{HTML}{087F8C}
+\definecolor{ochre}{HTML}{A86B17}
+\newcommand{\bodytext}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm,font=\figurefont\fontsize{9.2}{11.5}\selectfont] at (#1,#2) {#4};}
+\newcommand{\smallbody}[4]{\node[anchor=north west,inner sep=0,align=left,text width=#3cm,font=\figurefont\fontsize{8}{10}\selectfont] at (#1,#2) {#4};}
+\newcommand{\plotfigure}[1]{\node[anchor=north,inner sep=0] at (8,6.95) {\includegraphics[width=14.5cm,height=4.75cm,keepaspectratio]{figures/#1.pdf}};}
+\newcommand{\tableat}[3]{\node[anchor=north west,inner sep=0,font=\figurefont\fontsize{#2}{10.5}\selectfont] at (.9,#1) {#3};}
+\tikzset{sm/.style={font=\figurefont\fontsize{8}{9.6}\selectfont}}
+\newcommand{\lane}[3]{\node[anchor=west,inner sep=0,font=\figurefont\fontsize{7.4}{9}\selectfont,text=#3] at (#1,#2)}
+% Illustrative 16-cell vectors; shading is synthetic, not measured MIST output.
+\newcommand{\probrow}[2]{\foreach \i/\t in {0/12,1/80,2/6,3/18,4/92,5/9,6/4,7/55,8/14,9/7,10/70,11/22,12/5,13/38,14/88,15/10}{\fill[ink!\t] (#1+\i*.3,#2) rectangle +(.26,.26);}}
+\newcommand{\bitrow}[3]{\foreach \i/\b in {#3}{\pgfmathtruncatemacro{\t}{\b*100}\draw[line width=.35pt,draw=muted,fill=ink!\t] (#1+\i*.3,#2) rectangle +(.26,.26);}}
+\begin{document}
+
+% 00 — headline numbers.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{RETRIEVAL / MIST MODALITY / 2 OCT 2026}{A second spectrum view: FRIGID's MIST for molecular retrieval}
+\bodytext{.9}{6.65}{13.8}{\textbf{Question:} does a second, independently trained spectrum encoder (MIST, FRIGID's MassSpecGym checkpoint) add information to the single-model 44.10\% retrieval recipe? Two routes were tested on Isambard GH200: late score fusion and a trained-in auxiliary modality.}
+\foreach \x/\value/\label/\col in {2.7/{44.10\%}/{Base model, test Hit@1}/ink,8/{49.14\%}/{MIST alone, test Hit@1}/ochre,13.1/{61.52\%}/{Late fusion, test Hit@1}/teal}{
+  \node[font=\brandmedium\fontsize{30}{34}\selectfont,text=\col] at (\x,4.75) {\value};
+  \node[font=\figurefont\fontsize{10}{12}\selectfont] at (\x,3.95) {\label};
+}
+\bodytext{.9}{3.2}{13.8}{Fusion adds \textbf{+17.42 pp} (95\% CI 14.80–20.12) on 17,556 held-out test spectra. Training MIST features into the model lowers test Hit@1 by 0.2–2.1 pp and leaves less for fusion to add.}
+\takeaway{Use MIST as a late-fusion score; do not train it in with the current in-fold MIST features.}
+\source{Base: selected joint checkpoint (sha 324679e5\ldots), 46.02\% validation. Fusion weight and similarity chosen on the 5,000-spectrum validation subset only; test evaluated once. Pessimistic ranks (ties count against the truth). MIST code lives outside spectra-learning.}
+\end{tikzpicture}
+\end{frame}
+
+% 01 — two integration routes.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{01 / TWO ROUTES}{Add MIST after scoring, or inside the trained score}
+\spectrum{.75}{4.55}{.32}
+\node[tag,anchor=north] at (1.35,3.75) {spectrum $s$};
+\draw[ink,line width=.8pt] (2.05,4.85)--(3.05,4.85);
+\fill[ink] (3.05,4.85) circle (1.3pt);
+% Route A
+\lane{3.3}{7.0}{teal}{A / LATE SCORE FUSION \;·\; both models frozen; one weight $w$ chosen on validation};
+\node[box,text width=2.35cm] (fa) at (4.7,6.22) {44.10\% model\\$F(s,G)$};
+\node[box,text width=2.35cm] (ma) at (4.7,5.17) {MIST (frozen)\\$p\in[0,1]^{4096}$};
+\node[box,text width=2.4cm] (ba) at (7.8,5.17) {Bernoulli score\\$m(s,G)$ vs bits};
+\node[box,text width=2.4cm,minimum height=1.95cm] (za) at (11.05,5.7) {Per-query\\z-scores\\$z_F+w\,z_m$};
+\node[box,text width=1.4cm] (ra) at (14.05,5.7) {Rank\\the pool};
+\draw[arr] (3.05,4.85)|-(fa.west);
+\draw[arr] (3.05,4.85)|-(ma.west);
+\draw[arr] (ma.east)--(ba.west);
+\draw[arr] (fa.east)--(za.west|-fa.east);
+\draw[arr] (ba.east)--(za.west|-ba.east);
+\draw[arr] (za.east)--(ra.west);
+\draw[line,line width=.5pt] (3.3,4.5)--(15.1,4.5);
+% Route B
+\lane{3.3}{4.25}{ochre}{B / TRAINED-IN AUXILIARY MODALITY \;·\; MIST frozen; retrieval head retrained with the extra term};
+\node[box,text width=2.35cm] (mb) at (4.7,3.5) {MIST (frozen)\\h0 and/or $p$};
+\node[box,text width=2.4cm] (eb) at (7.8,3.5) {Aux encoder\\$a_s$ (256-d)};
+\node[box,ghost,text width=4.1cm,inner sep=3pt,minimum height=.6cm,sm] (pb) at (5.5,2.38) {Retrained base recipe:\\JEPA peaks, GINE, GLACIER};
+\node[box,text width=2.4cm,minimum height=1.75cm] (sb) at (11.05,2.98) {Trained score\\$F+w_{\mathrm{aux}}\,a_s^{\top}a_G$\\InfoNCE};
+\node[box,text width=1.4cm] (rb) at (14.05,2.98) {Rank\\the pool};
+\draw[arr] (3.05,4.85)|-(mb.west);
+\draw[arr] (mb.east)--(eb.west);
+\draw[arr] (eb.east)--(sb.west|-eb.east);
+\draw[arr] (pb.east)--(sb.west|-pb.east);
+\draw[arr] (sb.east)--(rb.west);
+\takeaway{Route A asks whether MIST is complementary; route B asks whether the model can learn to use it.}
+\source{Black arrows: data flow at inference. Dashed box: the unchanged base recipe (peak encoder, molecule GNN, fragment pooling) that route B retrains together with the auxiliary term. $G$: one candidate molecule in the supplied formula-matched pool; $a_G$: its auxiliary vector (slide 10). Spectrum drawing illustrative.}
+\end{tikzpicture}
+\end{frame}
+
+% 02 — MIST encoder anatomy.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{02 / THE MIST ENCODER}{Formula-annotated peaks in, a 4096-bit fingerprint out}
+\spectrum{.5}{5.4}{.32}
+\node[tag,anchor=north west,text width=2.0cm,align=left] at (.8,4.85) {peaks + precursor formula};
+\node[box,text width=1.9cm,minimum height=1.05cm] (an) at (4.15,5.7) {Subformula\\assignment};
+\node[box,text width=3.2cm,minimum height=1.05cm] (tr) at (7.5,5.7) {Formula transformer\\2 layers, 8 heads};
+\node[box,text width=1.6cm,minimum height=1.05cm] (cl) at (10.65,5.7) {CLS state\\$h_0\in\R^{640}$};
+\node[box,text width=2.6cm,minimum height=1.05cm] (gr) at (13.45,5.7) {Growing\\fingerprint head};
+\draw[arr] (2.1,5.7)--(an.west);\draw[arr] (an.east)--(tr.west);\draw[arr] (tr.east)--(cl.west);\draw[arr] (cl.east)--(gr.west);
+% token strip under the annotation step
+\foreach \i/\t in {0/100,1/25,2/25,3/25,4/25,5/25}{\draw[fill=ink!\t,draw=ink,line width=.45pt] (3.2+\i*.33,4.25) rectangle +(.25,.5);}
+\draw[thinarr] (an.south)--(4.15,4.8);
+\smallbody{3.15}{4.05}{2.35}{MS1 token (CLS) + one token per annotated peak ($\le 60$)}
+\smallbody{6.1}{4.95}{3.1}{Token: formula embedding (pos-cos) + intensity. Pairwise formula differences bias attention.}
+\smallbody{9.75}{4.95}{1.9}{Width 640; exported as \textbf{h0}.}
+% growing head stages, bar length proportional to bit count
+\foreach \w/\lab/\y in {.125/256/4.85,.25/512/4.6,.5/1024/4.35,1.0/2048/4.1,2.0/4096/3.85}{\fill[ink!35] (12.1,\y) rectangle +(\w,.16);\node[anchor=west,inner sep=0,font=\figurefont\fontsize{6.5}{7}\selectfont] at (12.16+\w,\y+.08) {\lab};}
+\smallbody{12.1}{3.6}{3.0}{Four coarse-to-fine sigmoid stages (bar length $\propto$ bits). Final $p\in[0,1]^{4096}$ is exported as \textbf{fp}.}
+\node[box,ghost,text width=3.4cm,inner sep=4pt,sm] (fr) at (7.5,2.45) {Per-peak fragment head (2048)\\training only; not used here};
+\draw[thinarr,dashed] (5.85,5.17)--(5.85,2.82);
+\takeaway{Two exports per spectrum: the 640-d CLS state (h0) and 4096 Morgan r2 bit probabilities (fp).}
+\source{FRIGID SpectraEncoderGrowing, MSG config: hidden 640, 2 peak-attention layers, 8 heads, CLS = MS1 token, pairwise featurization, 4 refinement stages (256$\to$4096), Morgan r2 / 4096 bits. Subformulae: FRIGID msg\_preprocessed trees. Solid arrows: inference path; dashed: training-only branch. Spectrum and token shading illustrative.}
+\end{tikzpicture}
+\end{frame}
+
+% 03 — data alignment and leakage check.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{03 / DATA AND FOLDS}{MIST saw the train fold only; validation and test stay held out}
+\lane{.9}{6.88}{muted}{MASSSPECGYM 1.5 · 231,104 SPECTRA (BAR LENGTH PROPORTIONAL TO COUNT)};
+\fill[ochre!70] (.9,5.55) rectangle (12.65,6.2);
+\fill[teal!55] (12.65,5.55) rectangle (13.83,6.2);
+\fill[teal] (13.83,5.55) rectangle (14.9,6.2);
+\node[text=paper,font=\figurefont\bfseries\fontsize{9}{11}\selectfont] at (6.8,5.875) {train 194,119 (84.0\%)};
+\node[sm,anchor=south] at (13.24,6.25) {val 19,429};
+\node[sm,anchor=north] at (14.37,5.5) {test 17,556};
+\draw[decorate,decoration={brace,mirror,amplitude=5pt},line width=.6pt] (.9,5.47)--(12.65,5.47);
+\node[sm,anchor=north] at (6.8,5.18) {MIST (FRIGID \texttt{mist\_msg.pt}) training data};
+\bodytext{.9}{4.55}{5.4}{\textbf{Fold check}\\MIST's split (DiffMS \texttt{split.tsv}) equals the MassSpecGym fold for every spectrum. None of the 2,998 test or 3,185 validation molecules is in MIST's training set.}
+\bodytext{6.65}{4.55}{5.0}{\textbf{Coverage}\\All spectra annotated and encoded; 0 root-formula mismatches. Annotated peaks per spectrum: median 14, 90th percentile 51, maximum 60.}
+\bodytext{12.05}{4.55}{3.1}{\textbf{Use}\\Validation: 5,000-spectrum subset, for selection.\\Test: reported once.}
+\takeaway{Fusion gains on validation and test are not explained by MIST having seen those molecules.}
+\source{Export: one GH200, torch 2.9.1+cu126, 27 s for all spectra; checkpoint sha256 09b4e93e\ldots; MassSpecGym TSV sha256 50cfdd1d\ldots. Fold sizes are spectra; molecule counts are unique test and validation structures.}
+\end{tikzpicture}
+\end{frame}
+
+% 04 — fingerprint quality by fold.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{04 / FINGERPRINT QUALITY}{MIST fingerprints are much sharper on its own training fold}
+\plotfigure{quality}
+\takeaway{Validation and test match each other (Tanimoto 0.54); training spectra get 0.75. This gap matters for route B.}
+\source{Agreement between MIST's predicted fingerprint and the true RDKit Morgan r2/4096 fingerprint of the measured molecule. Tanimoto binarizes $p$ at 0.187, FRIGID's MSG benchmark threshold. Train: 20,000 spectra sampled with seed 0. Means only; no intervals.}
+\end{tikzpicture}
+\end{frame}
+
+% 05 — scoring a candidate with MIST.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{05 / SCORING CANDIDATES}{Compare the predicted bits with every candidate's fingerprint}
+\lane{.9}{6.85}{muted}{ONE SPECTRUM, ONE CANDIDATE (16 OF 4096 BITS, ILLUSTRATIVE)};
+\node[anchor=east,sm] at (2.55,6.28) {MIST $p_j$};
+\probrow{2.7}{6.15}
+\node[anchor=east,sm] at (2.55,5.68) {candidate $b_j$};
+\bitrow{2.7}{5.55}{0/0,1/1,2/0,3/0,4/1,5/0,6/0,7/1,8/0,9/0,10/0,11/0,12/0,13/1,14/1,15/0}
+\smallbody{7.65}{6.38}{6.5}{$p$: MIST probability per bit (darker = higher).\\$b$: RDKit Morgan r2 / 4096 bits of candidate $G$.}
+\eqn[9.5]{.75}{4.95}{m_{\mathrm{Bern}}(s,G)=\frac{1}{4096}\sum_{j}\Big[b_j\log p_j+(1-b_j)\log(1-p_j)\Big]}
+\smallbody{.9}{3.35}{7.9}{Also tested: $\cos(p,b)$ and Tanimoto between $\mathbb{1}[p\ge0.187]$ and $b$. Probabilities clipped to $[10^{-6},\,1-10^{-6}]$.}
+\node[anchor=north west,inner sep=0,font=\figurefont\fontsize{8.4}{10.2}\selectfont] at (9.75,4.95) {\setlength{\tabcolsep}{4.5pt}\begin{tabular}{@{}lrrr@{}}\toprule
+ & \multicolumn{2}{c}{Hit@1 (\%)} & Test \\
+MIST alone & Val & Test & ties \\\midrule
+Cosine & 46.28 & 49.05 & 310 \\
+Tanimoto & 42.60 & 46.66 & 3,602 \\
+\textcolor{teal}{Bernoulli} & \textcolor{teal}{46.36} & \textcolor{teal}{49.14} & \textcolor{teal}{310} \\\midrule
+Base model & 46.02 & 44.10 & 0 \\\bottomrule
+\end{tabular}};
+\takeaway{MIST alone already matches the base model on validation and beats it on test.}
+\source{Candidate pools: supplied MassSpecGym 1.5 formula-matched pools, truth included; test pool size median 237, maximum 256; 2,909,859 test pairs. Pessimistic ranks. Test ties: test queries where some candidate ties the truth (counted against it). Validation: fixed 5,000-spectrum subset. Bit and probability shading on this slide is synthetic.}
+\end{tikzpicture}
+\end{frame}
+
+% 06 — fusion procedure and selection protocol.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{06 / LATE FUSION}{Standardize within each pool, add, and choose one weight on validation}
+\lane{.9}{6.88}{muted}{PER QUERY $s$ WITH CANDIDATE POOL $\mathcal{C}(s)$};
+\node[box,text width=2.75cm] (f) at (2.4,6.0) {Base scores\\$F(s,G)$ for $G\in\mathcal{C}$};
+\node[box,text width=2.75cm] (m) at (2.4,4.75) {MIST scores\\$m(s,G)$ for $G\in\mathcal{C}$};
+\node[box,text width=3.35cm,minimum height=2.1cm] (z) at (6.4,5.38) {Z-score within the pool\\[4pt]$\displaystyle z_x=\frac{x-\mu_{\mathcal C}(x)}{\sigma_{\mathcal C}(x)+10^{-6}}$};
+\node[box,text width=1.85cm,minimum height=2.1cm] (sum) at (9.85,5.38) {Fused score\\[4pt]$z_F+w\,z_m$};
+\node[box,text width=3.4cm,minimum height=2.1cm] (rk) at (13.15,5.38) {Pessimistic rank\\[4pt]$r=\#\{G:\tilde s_G\ge\tilde s_{G^\star}\}$};
+\draw[arr] (f.east)--(z.west|-f.east);\draw[arr] (m.east)--(z.west|-m.east);
+\draw[arr] (z.east)--(sum.west);\draw[arr] (sum.east)--(rk.west);
+\draw[line,line width=.5pt] (.9,3.9)--(15.1,3.9);
+\lane{.9}{3.6}{muted}{SELECTION PROTOCOL};
+\node[box,text width=2.7cm,sm] (g) at (2.4,2.65) {41 weights $w\in[0,5]$\\$\times$ 3 similarities};
+\node[box,text width=2.7cm,sm] (v) at (6.15,2.65) {Validation Hit@1\\5,000 spectra};
+\node[box,text width=2.7cm,sm] (t) at (9.9,2.65) {Best pair applied\\once to 17,556 test};
+\node[box,text width=2.7cm,sm] (b) at (13.6,2.65) {Paired bootstrap\\1,000 resamples};
+\draw[arr] (g.east)--(v.west);\draw[arr] (v.east)--(t.west);\draw[arr] (t.east)--(b.west);
+\takeaway{The only fitted quantities are the similarity type and one scalar weight, both chosen without test data.}
+\source{$\tilde s$: fused score; $G^\star$: the measured molecule. Pessimistic rank counts every tied candidate ahead of the truth. Bootstrap resamples test molecules (first InChIKey block) with replacement, keeping all spectra of a molecule together, and reports the 2.5/97.5 percentiles of the Hit@1 change.}
+\end{tikzpicture}
+\end{frame}
+
+% 07 — weight sweep.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{07 / WEIGHT SELECTION}{Validation Hit@1 rises from 46.02\% to 58.58\% and stays flat near the optimum}
+\plotfigure{fusion_curve}
+\takeaway{Bernoulli similarity at w = 0.9 is selected; every w from 0.75 to 1.0 is within 0.3 pp of it on validation.}
+\source{Fixed 5,000-spectrum validation subset; selected joint checkpoint (46.02\% validation). Each point: pessimistic Hit@1 of $z_F+w\,z_m$. Weights 0–0.19 in steps of 0.01, 0.2–1.0 in steps of 0.05, then 1.5, 2, 3, 5. No test data used.}
+\end{tikzpicture}
+\end{frame}
+
+% 08 — held-out test result.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{08 / HELD-OUT RESULT}{Fusion lifts test Hit@1 from 44.10\% to 61.52\%}
+\plotfigure{hit_at_k}
+\takeaway{+17.42 pp Hit@1 (95\% CI 14.80–20.12); MRR 0.575 $\to$ 0.708; median rank 2 $\to$ 1.}
+\source{All 17,556 test spectra, supplied formula pools, equal weight per spectrum, pessimistic ranks. Fusion: Bernoulli similarity, w = 0.9 from validation. Interval: molecule-clustered paired bootstrap (1,000 resamples). Hit@20 barely moves (92.23\% $\to$ 92.44\%): the gain is re-ordering near the top.}
+\end{tikzpicture}
+\end{frame}
+
+% 09 — complementarity matrix.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{09 / COMPLEMENTARITY}{The two models are right on different spectra}
+\node[sm] at (5.35,6.85) {MIST alone at rank 1};
+\node[sm] at (4.0,6.45) {correct};\node[sm] at (6.7,6.45) {wrong};
+\node[sm,rotate=90] at (1.3,4.65) {Base model at rank 1};
+\node[sm,rotate=90] at (2.0,5.45) {correct};\node[sm,rotate=90] at (2.0,3.85) {wrong};
+\foreach \x/\y/\n/\f/\fill in {
+  2.65/4.65/{4,343}/{4,343 (100\%)}/soft,
+  5.35/4.65/{3,400}/{2,513 (73.9\%)}/paper,
+  2.65/3.05/{4,284}/{3,195 (74.6\%)}/paper,
+  5.35/3.05/{5,529}/{750 (13.6\%)}/paper}{
+  \draw[line width=.7pt,fill=\fill] (\x,\y) rectangle +(2.7,1.6);
+  \node[font=\brandmedium\fontsize{17}{19}\selectfont] at (\x+1.35,\y+1.08) {\n};
+  \node[font=\figurefont\fontsize{7.4}{8.6}\selectfont,text=teal,align=center] at (\x+1.35,\y+.42) {fused correct\\\f};}
+\bodytext{8.9}{6.6}{6.2}{\textbf{17,556 test spectra}\\Base alone 44.10\%; MIST alone 49.14\%. Either one correct: \textbf{68.51\%}, the ceiling for a perfect per-spectrum switch.}
+\bodytext{8.9}{4.95}{6.2}{\textbf{What fusion does}\\Keeps 2,513 of 3,400 base-only wins and recovers 3,195 of 4,284 MIST-only wins. Ranks 750 spectra first that neither model ranks first alone.}
+\bodytext{8.9}{2.75}{6.2}{\textbf{Net:} 3,945 gained, 887 lost $\to$ 61.52\%.}
+\takeaway{Only a quarter of spectra are solved by both; fusion keeps most of each model's unique wins.}
+\source{Per-spectrum outcomes on the full test fold; pessimistic ranks; fusion = Bernoulli similarity, w = 0.9. Cell counts sum to 17,556. Teal: number (and within-cell fraction) that the fused score ranks first. Shaded cell: both correct.}
+\end{tikzpicture}
+\end{frame}
+
+% 10 — trained-in auxiliary architecture.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{10 / TRAINED-IN MODALITY}{A zero-initialized MIST term inside the retrieval score}
+\lane{.9}{6.95}{muted}{BASE RECIPE (UNCHANGED)};
+\node[box,text width=2.0cm,sm] (jp) at (2.0,6.35) {Frozen JEPA\\peak tokens $P$};
+\node[box,text width=1.75cm,sm] (pm) at (4.75,6.35) {Peak MLP\\queries $Q$};
+\node[box,text width=2.0cm,sm] (gn) at (2.0,5.35) {Candidate $G$:\\GINE + global};
+\node[box,text width=1.75cm,sm] (gl) at (4.75,5.35) {GLACIER\\$Z$, gates $g$};
+\node[box,text width=2.35cm,sm,minimum height=1.95cm] (bs) at (7.75,5.85) {Base score $F(s,G)$\\compatibility,\\cross-attention,\\log-mixture};
+\draw[arr] (jp.east)--(pm.west);\draw[arr] (gn.east)--(gl.west);
+\draw[arr] (pm.east)--(bs.west|-pm.east);\draw[arr] (gl.east)--(bs.west|-gl.east);
+\draw[line,line width=.5pt] (.9,4.7)--(9.3,4.7);
+\lane{.9}{4.5}{ochre}{AUXILIARY PATH (NEW)};
+\node[box,text width=4.0cm,sm,draw=ochre] (km) at (5.85,3.95) {$\ell_2\big(\textstyle\sum_f \operatorname{softmax}(g)_f\, z_f\, W_{\mathrm{key}}\big)$};
+\node[box,text width=2.3cm,sm,draw=ochre] (mf) at (1.95,2.95) {MIST features $x$\\h0 / fp / h0+fp};
+\node[box,text width=4.0cm,sm,draw=ochre] (ae) at (5.85,2.95) {LN $\to$ Linear 496 $\to$ GELU $\to$\\Dropout 0.1 $\to$ Linear 256 $\to$ $\ell_2$};
+\draw[arr,draw=ochre] (gl.south)--(gl.south|-km.north);
+\draw[arr,draw=ochre] (mf.east)--(ae.west);
+\node[anchor=west,inner sep=1pt] (aG) at (8.35,3.95) {$a_G$};
+\node[anchor=west,inner sep=1pt] (as) at (8.35,2.95) {$a_s$};
+\draw[ochre,line width=.8pt] (km.east)--(aG.west);\draw[ochre,line width=.8pt] (ae.east)--(as.west);
+\node[draw=ochre,line width=.7pt,fill=paper,circle,inner sep=1.5pt,font=\fontsize{9}{10}\selectfont] (dot) at (9.9,3.45) {$a_s^{\top}a_G$};
+\draw[arr,draw=ochre] (aG.east)--(dot);\draw[arr,draw=ochre] (as.east)--(dot);
+\node[box,text width=3.3cm,minimum height=1.75cm] (tot) at (12.85,5.6) {$\tilde F(s,G)=F(s,G)$\\$+\,w_{\mathrm{aux}}\,a_s^{\top}a_G$\\[2pt]{\figurefont\fontsize{8}{9.6}\selectfont at start: $w_{\mathrm{aux}}{=}0$, $W_{\mathrm{key}}{=}I$}};
+\draw[arr] (bs.east|-tot.west)--(tot.west);
+\draw[arr,draw=ochre] (dot.north)|-([yshift=-.55cm]tot.west);
+\node[box,text width=3.3cm,sm] (nce) at (12.85,3.45) {InfoNCE: in-batch +\\8 full-pool formula negatives};
+\draw[arr] (tot.south)--(nce.north);
+\takeaway{At initialization the model equals the baseline; any MIST influence must be learned from the training fold.}
+\source{Ochre: new auxiliary path (all trainable; the MIST features themselves are frozen inputs). Black: unchanged base recipe. Feature widths: h0 640, fp 4096, h0+fp 4736. $z_f$: GLACIER fragment embedding; $g$: fragment gates. Same head recipe as the 44.10\% source head: learning rate 5e-4, patience 8, seed 0; precomputed (frozen) JEPA tokens in this stage.}
+\end{tikzpicture}
+\end{frame}
+
+% 11 — head-stage curves.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{11 / HEAD-STAGE TRAINING}{MIST runs fit the training fold faster but validate no better}
+\plotfigure{head_curves}
+\takeaway{Training loss falls to about half of the control's, while validation Hit@1 stays at or below the control.}
+\source{Isambard job 7007408: four runs, one GH200 each, seed 0, identical data order and recipe except the auxiliary term. Validation: fixed 5,000-spectrum subset after each epoch; early stopping with patience 8 on validation Hit@1. Control and original source head differ by seed and hardware only.}
+\end{tikzpicture}
+\end{frame}
+
+% 12 — why the trained-in route underperforms.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{12 / WHY TRAINING IT IN DOES NOT HELP}{The training fold rewards trusting MIST more than held-out data does}
+\tableat{6.8}{8.6}{\setlength{\tabcolsep}{5pt}\begin{tabular}{@{}lrrrr@{}}\toprule
+ & & \multicolumn{2}{c}{Hit@1 (\%)} & Train \\
+Head run (seed 0) & Best ep. & Val & Test & loss \\\midrule
+Control & 9 & 43.76 & \textbf{43.15} & 0.084 \\
+MIST h0 + fp & 7 & 43.38 & 42.40 & 0.043 \\
+MIST h0 & 6 & 42.86 & 42.93 & 0.046 \\
+MIST fp & 16 & 43.72 & 41.02 & 0.033 \\\bottomrule
+\end{tabular}}
+\foreach \n/\y/\col/\txt in {c1/6.5/ochre/{Train fold: MIST Tanimoto 0.75},c2/5.55/ink/{Aux term separates training candidates},c3/4.6/ink/{Less signal for peak–fragment matching},c4/3.65/teal/{At test: Tanimoto 0.54, lower Hit@1}}{
+  \node[box,text width=5.2cm,inner sep=3pt,minimum height=.55cm,sm,draw=\col] (\n) at (12.2,\y) {\txt};}
+\draw[arr] (c1)--(c2);\draw[arr] (c2)--(c3);\draw[arr] (c3)--(c4);
+\node[tag,anchor=north,text width=5.6cm,align=center] at (12.2,3.2) {A hypothesis consistent with the curves; not isolated by a separate test.};
+\bodytext{.9}{3.75}{7.8}{\textbf{Fusion avoids the shortcut.} Its single weight is chosen on held-out validation spectra, where MIST is as reliable as on test, so it cannot over-trust MIST.}
+\takeaway{To train MIST in, give the model out-of-fold MIST predictions for the training spectra.}
+\source{Best ep. = validation-selected epoch. Train loss: mean InfoNCE at the last logged epoch (control 17, h0+fp 15, h0 14, fp 24). Test Hit@1 from the selected checkpoint. MIST quality (Tanimoto) from slide 04. Single seed per run; the control is 1.28 pp below the original source head on validation.}
+\end{tikzpicture}
+\end{frame}
+
+% 13 — fusion on top of each head.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{13 / FUSION ON TOP OF EACH HEAD}{Trained-in MIST also leaves less for fusion to add}
+\plotfigure{head_fusion}
+\takeaway{Control head + fusion reaches 61.10\%; MIST-trained heads + fusion reach only 57.17–58.78\%.}
+\source{Same fusion procedure for every row: similarity and weight selected on the 5,000-spectrum validation subset, test applied once. Gains over each model alone: selected joint +17.42, control +17.95, h0+fp +15.73, h0 +15.85, fp +16.15 pp; all 95\% intervals exclude zero. Head rows: head stage only, no joint stage.}
+\end{tikzpicture}
+\end{frame}
+
+% 14 — decision.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{14 / DECISION AND NEXT EXPERIMENTS}{Adopt late fusion; revisit training-in with out-of-fold features}
+\bodytext{.9}{6.75}{6.6}{\textbf{Carry forward}\\Late fusion of the 44.10\% model with MIST Bernoulli similarity, w = 0.9: \textbf{61.52\% test Hit@1}. No retraining; MIST inference takes 27 s for all 231,104 spectra on one GH200.}
+\bodytext{8.3}{6.75}{6.8}{\textbf{Do not carry forward}\\The trained-in auxiliary term (any feature set). It lowers both the model alone and the fused result. The joint stage was skipped because no auxiliary head beat the control.}
+\bodytext{.9}{4.4}{14.2}{\textbf{Next}\\1. Fuse MIST with the 47.33\% 15-member ensemble; reselect w on validation.\\2. Train MIST in K folds; rerun route B with out-of-fold MIST features.\\3. Repeat the control and the best auxiliary head over three seeds.}
+\takeaway{Recommended: 44.10\% model + MIST late fusion (61.52\% test Hit@1, single seed, validation-selected weight).}
+\source{All results single-seed. The fusion interval is a molecule-clustered paired bootstrap over test spectra; it does not cover seed variance. MIST code, exports and fusion scripts are kept outside spectra-learning (/mnt/data/mist-modality; Isambard /scratch/u6rb/wuhao.u6rb/mist-modality).}
+\end{tikzpicture}
+\end{frame}
+
+% A — reproduction and compute.
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{APPENDIX A / REPRODUCTION}{Every step ran as an Isambard GH200 Slurm job}
+\tableat{6.85}{7.8}{\setlength{\tabcolsep}{5pt}\begin{tabular}{@{}p{2.3cm}p{6.1cm}p{5.2cm}@{}}\toprule
+Step & Script & Output and check \\\midrule
+Export MIST & \texttt{export\_mist\_features.py} & fp\_prob and h0 for 231,104 rows \\
+Aux inputs & \texttt{make\_aux\_inputs.py} & aux\_\{h0fp, fp, h0\} feature directories \\
+Reproduce base & \texttt{run\_retrieval\_jax.py --stage eval} (repo) & Test Hit@1 0.4410457963, exact match \\
+Dump scores & \texttt{dump\_retrieval\_scores.py} (repo, untracked) & Per-candidate val/test scores \\
+Late fusion & \texttt{fuse\_mist\_scores.py} & Weight sweep, test, bootstrap \\
+Complementarity & \texttt{overlap\_mist.py} & 2$\times$2 outcome table (slide 09) \\
+Aux heads & \texttt{run\_retrieval\_jax.py --aux-spectrum} (repo) & Four head runs, job 7007408 \\\bottomrule
+\end{tabular}}
+\bodytext{.9}{3.15}{14.2}{Scripts without “(repo)” live in /mnt/data/mist-modality. Retrieval inputs were staged from Modal through Azure with rsync and per-file sha256 checks. Environment: JAX 0.11.0 with CUDA 12 (driver 565), one process per GPU.}
+\takeaway{The base checkpoint was re-evaluated on Isambard before any MIST comparison and matched exactly.}
+\source{MIST code: FRIGID checkout (SpectraEncoderGrowing, PeakFormula featurizer), imported without its package init. Results JSON for every plot is in presentations/mist\_modality/research/. Local copies of run reports: /mnt/data/mist-modality/results.}
+\end{tikzpicture}
+\end{frame}
+
+\end{document}

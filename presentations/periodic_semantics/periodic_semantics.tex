@@ -11,13 +11,12 @@
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{REPRESENTATION AUDIT / 29 SEP 2026}{}
-\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{25}{29}\selectfont,text width=13.8cm,align=left] at (.75,7.25) {Does promoting the student\\make chemistry emerge?};
-\bodytext{.85}{5.0}{13.8}{\textbf{A tradeoff, not a general improvement.}\\Global similarity and peak-dropout robustness improve. Chemical readouts, local neighbors and repeat-spectrum retrieval worsen.}
-\bodytext{.85}{3.48}{8.3}{Initial teacher \(\rightarrow\) 24 promotions \(\rightarrow\) step 1,209,000\\A fresh audit plus existing depth and attention probes}
-\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{25}{28}\selectfont] at (10.3,3.5) {\MaccsDelta};
-\bodytext{10.3}{2.55}{4.5}{Change in final-mean\\MACCS AUROC}
-\takeaway{The evidence does not support automatic semantic improvement from promotion.}
-\source{Three exact encoder states; one training run. No matched never-promoted control: the causal contribution of promotion remains unidentified.}
+\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{25}{29}\selectfont,text width=13.8cm,align=left] at (.75,7.25) {From MAE to JEPA:\\does chemistry improve?};
+\bodytext{.85}{5.0}{13.8}{\textbf{Chemical readouts improve with initial JEPA, then decline.}\\The later periodic student scores below both predecessors on chemical probes; global similarity and robustness show different patterns.}
+\node[anchor=north west,inner sep=0,font=\brandmedium\fontsize{30}{34}\selectfont] at (.85,3.48) {\MaeAUC\ \(\rightarrow\) \InitialAUC\ \(\rightarrow\) \LatestAUC};
+\bodytext{.85}{2.42}{13.8}{Final-mean MACCS AUROC: original MAE / initial JEPA teacher / periodic student}
+\takeaway{The initial JEPA gain does not persist at the periodic endpoint; promotion is not a semantic guarantee.}
+\source{Four exact encoder states: MAE, initial JEPA teacher and two states from one periodic run. No matched never-promoted control: the causal contribution of promotion remains unidentified.}
 \end{tikzpicture}
 \end{frame}
 
@@ -40,18 +39,27 @@
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{02 / LINEAGE}{The initial teacher already learned chemistry}
-\diagramblock{3.05}{5.4}{3.9}{1.1}{MAE ancestor\\step 666,000}
+\diagramblock{3.05}{5.4}{3.9}{1.1}{Original MAE encoder\\step 666,000}
 \diagramblock{8.0}{5.4}{3.9}{1.1}{Frozen-teacher JEPA\\step 1,190,000}
-\draw[arr] (5.05,5.4)--(5.98,5.4);
-\node[tag] at (5.55,5.97) {supervises};
+\draw[arr] (5.25,5.4)--(5.80,5.4);
+\node[tag] at (5.55,6.45) {supervises};
 \bodytext{10.6}{5.93}{4.4}{This JEPA student becomes\\the \textbf{initial teacher}.}
-\draw[arr] (8,4.8)--(8,4.0);
+\draw[arr] (8,4.64)--(8,4.01);
 \diagramblock{3.05}{3.35}{3.9}{.9}{Fresh periodic student\\random initialization}
 \diagramblock{8.0}{3.35}{3.9}{.9}{Promote every 50,000\\completed updates}
-\draw[arr] (5.05,3.35)--(5.98,3.35);
+\draw[arr] (5.25,3.35)--(5.80,3.35);
 \bodytext{10.6}{3.95}{4.3}{\textbf{24 promotions}\\Teacher: 1,200,000\\Student: 1,209,000}
-\takeaway{Compare to the JEPA initial teacher, not only to a random encoder or the MAE ancestor.}
+\takeaway{Measure the MAE ancestor, the initial JEPA teacher and the two later periodic states separately.}
 \source{Verified W\&B config, GCS checkpoint listing and promotion implementation. Latest saved: 1,209,000; W\&B last logged: 1,208,750; run state: crashed.}
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}
+\begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
+\header{TRAINING / TWO RUNS}{The loss stays the same; the teacher update changes}
+\node[anchor=north,inner sep=0] at (8,6.82) {\includegraphics[width=14.5cm,height=4.85cm,keepaspectratio]{figures/training_schemes_slide.pdf}};
+\takeaway{Black: forward computation. Teal dashed: gradient updates. Ochre dashed: encoder weight copies.}
+\source{Both runs: full-spectrum teacher; random 60\% context and 25\% target positions; latent MSE. Token counts are schematic. Teacher targets are detached; periodic copies preserve student and optimizer state.}
 \end{tikzpicture}
 \end{frame}
 
@@ -75,9 +83,9 @@
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{05 / FRESH CHEMICAL PROBES}{Balancing by molecule preserves the main finding}
+\header{05 / FRESH CHEMICAL PROBES}{Compare the original MAE, initial JEPA teacher and later states}
 \plotfigure{chemical_probes}
-\takeaway{Final-mean MACCS AUROC: initial \InitialAUC\; versus latest \LatestAUC.}
+\takeaway{MACCS AUROC: MAE \MaeAUC\; / initial JEPA \InitialAUC\; / promoted \PromotedAUC\; / student \LatestAUC.}
 \source{\freshsource\ Train-only standardization; eight ridge penalties selected on validation. 166 MACCS bits, 15 functional groups, seven properties. Undefined AUROCs excluded.}
 \end{tikzpicture}
 \end{frame}
@@ -93,9 +101,9 @@
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{07 / UNCERTAINTY}{The main losses are larger than molecule-sampling noise}
+\header{07 / UNCERTAINTY}{JEPA improves probes over MAE, not raw nearest-neighbor chemistry}
 \plotfigure{paired_uncertainty}
-\takeaway{Paired comparisons reuse the same test molecules and preserve teacher--student pairing.}
+\takeaway{JEPA--MAE raw-neighbor uncertainty includes zero; the periodic endpoint falls below both predecessors.}
 \source{95\% percentile bootstrap intervals: 500 molecule resamples for macro AUROC, 2,000 for neighbor Tanimoto. Fixed trained models; no training-seed uncertainty or multiple-testing correction.}
 \end{tikzpicture}
 \end{frame}
@@ -104,7 +112,7 @@
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{08 / REPRESENTATION SHAPE}{Mean geometry spreads; CLS becomes nearly one-dimensional}
 \plotfigure{covariance}
-\takeaway{Mean effective rank rises from 28 to 79; CLS puts 97.2\% of its variance in one component.}
+\takeaway{Initial JEPA to periodic student: mean effective rank 28 to 79; CLS puts 97.2\% of its variance in one component.}
 \source{Covariance of train-molecule centroids. Effective rank: exp(entropy of normalized eigenvalues); PC1: largest variance fraction. Mean cosine includes self pairs (O(1/N) contribution).}
 \end{tikzpicture}
 \end{frame}
@@ -113,7 +121,7 @@
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{09 / POSITIVE EVIDENCE}{Global chemical ordering improves despite weaker local neighbors}
 \plotfigure{cls_exception}
-\takeaway{Raw-mean partial Spearman rises from 0.153 to 0.243; the geometry result is mixed.}
+\takeaway{Initial JEPA to periodic student: partial Spearman 0.153 to 0.243; the geometry result is mixed.}
 \source{\freshsource\ 99,955 sampled distinct-molecule pairs; raw and train-standardized cosine are distinguished. Pairs share molecules; no pair-based confidence intervals.}
 \end{tikzpicture}
 \end{frame}
@@ -138,9 +146,9 @@
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{12 / ROBUSTNESS}{Stability is useful, but it is a separate objective}
+\header{12 / ROBUSTNESS}{MAE already has strong dropout and repeat-spectrum stability}
 \plotfigure{robustness}
-\takeaway{Peak-dropout retrieval: 32\% to 99\%; metadata-zero retrieval: 95\% to 20\%; repeat retrieval: 36\% to 26\%.}
+\takeaway{MAE / initial JEPA / periodic student: repeat-spectrum retrieval 44\% / 36\% / 26\%; dropout 98\% / 32\% / 99\%.}
 \source{Perturbations: one spectrum from each of 2,048 test molecules; fixed seed. Repeat retrieval: \RepeatCount\ molecules, two distinct rows each. Synthetic interventions, not validated physical acquisition models.}
 \end{tikzpicture}
 \end{frame}
@@ -168,8 +176,8 @@
 
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
-\header{15 / WHAT WE CAN CONCLUDE}{Evidence against the strong claim; no isolated causal estimate}
-\bodytext{1.0}{6.45}{6.3}{\textbf{Observed}\\[6pt]Chemical signal above simple baselines.\\[6pt]Most endpoint chemical readouts worsen.\\[6pt]Some pooling and robustness measures differ.\\[6pt]Latest promoted teacher and student are close.}
+\header{15 / WHAT WE CAN CONCLUDE}{Observed differences do not isolate the effect of promotion}
+\bodytext{1.0}{6.45}{6.3}{\textbf{Observed}\\[6pt]Initial JEPA probes improve over MAE.\\[6pt]Periodic probes fall below JEPA and MAE.\\[6pt]Some pooling and robustness measures differ.\\[6pt]Latest promoted teacher and student are close.}
 \draw[line] (7.75,2.65)--(7.75,6.55);
 \bodytext{8.25}{6.45}{6.7}{\textbf{Not established}\\[6pt]Promotion alone caused the deterioration.\\[6pt]Every generation gets worse.\\[6pt]The same result holds across seeds or masks.\\[6pt]Pretraining molecules never overlap this benchmark.}
 \takeaway{For this checkpoint: retained chemistry, but no broad semantic improvement over its initial teacher.}
@@ -193,8 +201,8 @@
 \begin{frame}
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{APPENDIX / PROTOCOL}{What was run, and what was reused}
-\bodytext{1.0}{6.5}{6.5}{\textbf{Fresh, 29 September}\\[5pt]Three states; all 231,104 spectra.\\[5pt]Block 13 / 19 / final mean and final CLS.\\[5pt]Probes, geometry, covariance, robustness and single-spectrum neighbors.\\[5pt]Paired bootstrap; shuffled-label control.}
-\bodytext{8.15}{6.5}{6.7}{\textbf{Reanalyzed, 28 September}\\[5pt]27 depths \(\times\) mean / CLS.\\[5pt]Random and MAE reference encoders.\\[5pt]Two-seed attention and linear probes.\\[5pt]Legacy tie handling and test-fitted pairwise scaling limit these comparisons.}
+\bodytext{1.0}{6.5}{6.5}{\textbf{Fresh, 29 September}\\[5pt]Four states, including MAE; all 231,104 spectra.\\[5pt]Block 13 / 19 / final mean and final CLS.\\[5pt]Probes, geometry, covariance, robustness and single-spectrum neighbors.\\[5pt]Paired bootstrap; shuffled-label control.}
+\bodytext{8.15}{6.5}{6.7}{\textbf{Reanalyzed, 28 September}\\[5pt]27 depths \(\times\) mean / CLS.\\[5pt]Random and all four trained encoders.\\[5pt]Two-seed attention and linear probes.\\[5pt]Legacy tie handling and test-fitted pairwise scaling limit these comparisons.}
 \takeaway{Fresh metrics use a distinct, stricter protocol; do not subtract scores across protocols.}
 \source{Original training remains JAX. Frozen evaluation reuses staged PyTorch encoder exports; state-conversion and promotion tests passed. Cached export hashes and source hashes are saved.}
 \end{tikzpicture}
@@ -204,7 +212,7 @@
 \begin{tikzpicture}[remember picture,overlay,shift={(current page.south west)}]
 \header{APPENDIX / SINGLE SPECTRUM}{The local-neighbor loss is not an averaging artifact}
 \plotfigure{single_spectrum}
-\takeaway{With one measured spectrum per molecule, raw neighbor Tanimoto falls from 0.173 to 0.161.}
+\takeaway{Initial JEPA to periodic student: single-spectrum raw neighbor Tanimoto falls from 0.173 to 0.161.}
 \source{First file row per molecule: 22,746 train candidates, 2,998 test queries. Final valid-peak mean; no centroid averaging. Physical precursor window: ±5 Th, after undoing input normalization.}
 \end{tikzpicture}
 \end{frame}
@@ -225,7 +233,7 @@
 \header{APPENDIX / REFERENCES}{Sources and reproducibility}
 \bodytext{1.0}{6.4}{13.8}{\href{https://wandb.ai/iclac/jepa-finalrun/runs/1p8b-ptjepa-t1190k-p50k-b1024-v6e32-20260922-062250}{Periodic-teacher W\&B run} and saved GCS checkpoint metadata\\[8pt]\texttt{scripts/modal\_periodic\_semantics.py} --- fresh frozen-encoder audit\\\texttt{scripts/analyze\_periodic\_semantics.py} --- paired uncertainty\\\texttt{research/summary.json} --- full results\\[8pt]\href{https://arxiv.org/abs/2301.08243}{Assran et al. (2023), I-JEPA}: masking and predictive representations.\\\href{https://arxiv.org/abs/2105.04906}{Bardes et al. (2022), VICReg}: explicit control of variance and covariance.\\\href{https://arxiv.org/abs/2104.14294}{Caron et al. (2021), DINO}: empirical emergent semantics in a different recipe.}
 \takeaway{The conclusions come from checkpoint measurements; the papers supply context, not proof for this run.}
-\source{Built from repository sources with the existing virtual environment. See periodic\_semantics\_README.md for commands, caveats and the artifact inventory.}
+\source{Built from repository sources with the existing virtual environment. See README.md for commands, caveats and the artifact inventory.}
 \end{tikzpicture}
 \end{frame}
 

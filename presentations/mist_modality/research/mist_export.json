@@ -1,0 +1,14 @@
+{
+  "source": "export_mist_features.py metadata.json (Isambard /scratch/u6rb/wuhao.u6rb/mist-modality/features)",
+  "rows": 231104,
+  "available": 231104,
+  "by_fold": {"train": 194119, "val": 19429, "test": 17556},
+  "root_formula_mismatches": 0,
+  "subformula_peak_count_quantiles_0_50_90_99_100": [0, 14, 51, 60, 60],
+  "checkpoint_sha256": "09b4e93e8d5d35e7472f4d187d72ca316b125368232bb69148df101ec211b92a",
+  "msg_tsv_sha256": "50cfdd1d22f79543c59555f9ce43c6893bd788a19a42b21fb4e2e3a54673c06a",
+  "torch": "2.9.1+cu126",
+  "device": "cuda (GH200)",
+  "encode_seconds": 27.3,
+  "fold_check": "MIST training split (DiffMS split.tsv) equals MassSpecGym fold for all 231,104 spectra; no overlap with the 2,998 test or 3,185 validation molecules"
+}

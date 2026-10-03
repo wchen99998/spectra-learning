@@ -8,14 +8,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "research"
 OUT = ROOT / "figures"
-ARMS = ("ftjepa_1190k", "periodic_student_1200k", "periodic_student_1209k")
-LABELS = ("Initial teacher", "Promoted teacher", "Latest student")
-COLORS = ("#0C0C0C", "#8A9398", "#007C83")
+ARMS = ("mae_666k", "ftjepa_1190k", "periodic_student_1200k", "periodic_student_1209k")
+LABELS = ("MAE 666k", "JEPA initial teacher", "Periodic teacher 1,200k", "Periodic student 1,209k")
+COLORS = ("#B88746", "#0C0C0C", "#8A9398", "#007C83")
+MARKERS = ("s", "o", "^", "D")
 
 
 def setup():
@@ -46,8 +48,8 @@ def save(fig, name):
 
 def grouped(ax, values, categories, ylabel, ylim=None):
     x = np.arange(len(categories))
-    for j, (v, color, label) in enumerate(zip(values, COLORS, LABELS)):
-        ax.plot(x+(j-1)*.15, v, "o", color=color, label=label, markersize=3.7)
+    for j, (v, color, label, marker) in enumerate(zip(values, COLORS, LABELS, MARKERS)):
+        ax.plot(x+(j-1.5)*.15, v, marker, color=color, label=label, markersize=3.7)
     ax.set_xticks(x, categories)
     ax.set_ylabel(ylabel)
     if ylim: ax.set_ylim(*ylim)
@@ -60,7 +62,7 @@ def main():
     finals = [models[a]["features"]["mean_final"] for a in ARMS]
     history = json.loads((DATA / "training_history.json").read_text())
     fig, ax = panels()
-    for group, color in (("train", COLORS[2]), ("val", COLORS[0])):
+    for group, color in (("train", COLORS[3]), ("val", COLORS[1])):
         points = [r for r in history[group] if r.get(group + "/loss") is not None]
         x = np.array([r["global_step"] for r in points]) / 1e6
         y = np.array([r[group + "/loss"] for r in points])
@@ -75,9 +77,9 @@ def main():
     save(fig,"training_loss")
 
     fig, ax = panels()
-    legacy_names = ("random_init", "mae_666k", *ARMS)
-    for name, label, color, style in zip(legacy_names, ("Random", "MAE ancestor", *LABELS),
-                                      ("#B0B0B0", "#B88746", *COLORS), (":", "--", "-", "--", "-")):
+    legacy_names = ("random_init", *ARMS)
+    for name, label, color, style in zip(legacy_names, ("Random", *LABELS),
+                                      ("#B0B0B0", *COLORS), (":", "--", "-", "--", "-")):
         old = json.loads((DATA / f"legacy_{name}.json").read_text())["layers"]
         layers = ["embed", *map(str, range(1,26)), "final"]
         for a, metric in zip(ax, ("auc_maccs_macro", "knn_top1_tanimoto")):
@@ -88,21 +90,24 @@ def main():
     save(fig,"legacy_depth")
 
     fig, ax = panels(3)
-    for a, metric, title in zip(ax,("maccs_auc","fg_auc","r2_mean"),("MACCS macro AUROC","Functional-group AUROC","Mean property R²")):
-        grouped(a,[[f["ridge"]["1.0"][metric]] for f in finals],["Final mean"],title)
-        for j,f in enumerate(finals):
-            value=f["ridge"]["1.0"][metric]
-            a.annotate(f"{value:.3f}",((j-1)*.15,value),xytext=(0,7),textcoords="offset points",ha="center",fontsize=6)
-        a.margins(y=.2)
-    ax[0].legend(frameon=False,loc="center right")
-    save(fig,"chemical_probes")
+    for a, metric, title in zip(ax, ("maccs_auc", "fg_auc", "r2_mean"),
+                               ("MACCS macro AUROC", "Functional-group AUROC", "Mean property R²")):
+        for j, (f, color, marker) in enumerate(zip(finals, COLORS, MARKERS)):
+            value = f["ridge"]["1.0"][metric]
+            a.plot(j, value, marker, color=color, markersize=4)
+            a.annotate(f"{value:.3f}", (j, value), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=6)
+        a.set_xticks(range(4), ["MAE\n666k", "JEPA\ninitial", "Teacher\n1,200k", "Student\n1,209k"])
+        a.set_ylabel(title)
+        a.set_xlim(-.55, 3.55)
+        a.margins(y=.4)
+    save(fig, "chemical_probes")
 
     fig, ax = panels(3)
     variants=("raw","centered","standardized","whiten_0.01")
     for a,metric,title in zip(ax,("knn1_tanimoto","pair_partial_spearman","knn1_mass_window_5Da"),
                             ("Nearest-neighbor Tanimoto","Partial Spearman ρ","Tanimoto within ±5 Th")):
-        for f,color,label in zip(finals,COLORS,LABELS):
-            a.plot(range(4),[f["geometry"][v][metric] for v in variants],"o-",color=color,label=label,markersize=3)
+        for f,color,label,marker in zip(finals,COLORS,LABELS,MARKERS):
+            a.plot(range(4),[f["geometry"][v][metric] for v in variants],marker+"-",color=color,label=label,markersize=3)
         a.set_xticks(range(4),["Raw","Center","Scale","Whiten"],rotation=20)
         a.set_ylabel(title)
     ax[0].legend(frameon=False)
@@ -130,43 +135,54 @@ def main():
 
     fig, ax = panels()
     for a,metric,title in zip(ax,("maccs_auc","r2_mean"),("MACCS macro AUROC","Mean property R²")):
-        for f,color,label in zip(finals,COLORS,LABELS):
+        for f,color,label,marker in zip(finals,COLORS,LABELS,MARKERS):
             values=[f["ridge"][str(v)] for v in (.01,.1,1.)]
-            a.plot([v["train_molecules"] for v in values],[v[metric] for v in values],"o-",color=color,label=label,markersize=3)
+            a.plot([v["train_molecules"] for v in values],[v[metric] for v in values],marker+"-",color=color,label=label,markersize=3)
         a.set_xscale("log");a.set_xlabel("Labeled training molecules");a.set_ylabel(title)
     ax[0].legend(frameon=False)
     save(fig,"label_efficiency")
 
     fig, ax = panels()
     for i,method in enumerate(("mean_linear","attentive")):
-        for arm,color,label in zip((ARMS[0],ARMS[2]),(COLORS[0],COLORS[2]),(LABELS[0],LABELS[2])):
+        for j in (0, 1, 3):
+            arm, color, label, marker = ARMS[j], COLORS[j], LABELS[j], MARKERS[j]
             old=json.loads((DATA/f"legacy_attentive_{arm}.json").read_text())["layers"]
             vals=np.array([[v["test"]["auc_maccs_macro"] for v in old[l][method]] for l in ("13","19","final")])
-            ax[i].plot(range(3),vals.mean(1),"o-",color=color,label=label,markersize=3)
+            ax[i].plot(range(3),vals.mean(1),marker+"-",color=color,label=label,markersize=3)
             for seed in range(2):ax[i].scatter(np.arange(3)+(seed-.5)*.05,vals[:,seed],color=color,marker="_",s=25,linewidths=.7)
         ax[i].set_xticks(range(3),["13","19","Final"]);ax[i].set_xlabel("Readout depth")
         ax[i].set_ylabel("MACCS macro AUROC");ax[i].set_title(chr(97+i)+"  "+("Mean + linear" if i==0 else "Learned attention"),loc="left")
-        ax[i].set_ylim(.775,.81)
+        ax[i].margins(y=.2)
     ax[0].legend(frameon=False)
     save(fig,"attentive")
 
     fig, ax = panels()
-    effects=summary["paired_differences"][ARMS[2]]
-    for a,keys,labels in ((ax[0],[f+"_maccs_auc" for f in ("mean_final","mean_19","cls_final")],["Final mean","Block 19 mean","Final CLS"]),
-                          (ax[1],[f"mean_final_{v}_knn1" for v in ("raw","standardized")],["Raw final mean","Scaled final mean"])):
-        a.axvline(0,color="#999999",linestyle="--",linewidth=.5)
-        for j,key in enumerate(keys):
-            item=effects[key]; lo,hi=item["ci95"];d=item["delta"]
-            a.errorbar(d,j,xerr=[[d-lo],[hi-d]],fmt="o",color=COLORS[2],markersize=4,capsize=2)
-        a.set_yticks(range(len(keys)),labels);a.set_xlabel("Latest student minus initial teacher")
-    ax[0].set_title("a  Δ MACCS AUROC (95% CI)",loc="left");ax[1].set_title("b  Δ nearest-neighbor Tanimoto (95% CI)",loc="left")
-    save(fig,"paired_uncertainty")
+    comparisons = (
+        (summary["stage_differences"]["jepa_minus_mae"], "JEPA initial − MAE", COLORS[1], MARKERS[1]),
+        (summary["paired_differences"][ARMS[3]], "Periodic student − JEPA initial", COLORS[3], MARKERS[3]),
+        (summary["stage_differences"]["latest_minus_mae"], "Periodic student − MAE", COLORS[0], MARKERS[0]),
+    )
+    for a, key, title in zip(ax, ("mean_final_maccs_auc", "mean_final_raw_knn1"),
+                            ("a  Δ MACCS AUROC (95% CI)", "b  Δ raw neighbor Tanimoto (95% CI)")):
+        a.axvline(0, color="#999999", linestyle="--", linewidth=.5)
+        for j, (effects, label, color, marker) in enumerate(comparisons):
+            item = effects[key]
+            lo, hi = item["ci95"]
+            d = item["delta"]
+            a.errorbar(d, j, xerr=[[d-lo], [hi-d]], fmt=marker, color=color, markersize=4, capsize=2)
+        a.set_yticks(range(3), [c[1] for c in comparisons], fontsize=6)
+        a.invert_yaxis()
+        a.set_xlabel("Difference in final-mean score")
+        a.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        a.set_title(title, loc="left")
+        a.margins(y=.3)
+    save(fig, "paired_uncertainty")
 
     fig, ax = panels(1)
     props=list(finals[0]["ridge"]["1.0"]["r2"])
     grouped(ax[0],[[f["ridge"]["1.0"]["r2"][p] for p in props] for f in finals],
             ["logP","Rings","TPSA","Fraction sp³","Aromatic rings","H donors","H acceptors"],"Property R²")
-    ax[0].legend(frameon=False,ncol=3)
+    ax[0].legend(frameon=False,ncol=2)
     save(fig,"properties")
 
     fig, ax = panels()
@@ -180,8 +196,8 @@ def main():
     variants=("raw", "standardized", "whiten_0.01")
     for a,key,title in zip(ax,("knn1_tanimoto","knn1_mass_window_5Da"),
                           ("Single-spectrum neighbor Tanimoto","Single-spectrum Tanimoto within ±5 Th")):
-        for arm,color,label in zip(ARMS,COLORS,LABELS):
-            a.plot(range(3),[models[arm]["single_spectrum"][v][key] for v in variants],"o-",color=color,label=label,markersize=3)
+        for arm,color,label,marker in zip(ARMS,COLORS,LABELS,MARKERS):
+            a.plot(range(3),[models[arm]["single_spectrum"][v][key] for v in variants],marker+"-",color=color,label=label,markersize=3)
         a.set_xticks(range(3),["Raw", "Standardized", "Whitened"]);a.set_ylabel(title)
     ax[0].legend(frameon=False)
     save(fig,"single_spectrum")

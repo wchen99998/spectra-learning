@@ -4,30 +4,54 @@
 
 Evaluated 29 September 2026. [Requested W&B run](https://wandb.ai/iclac/jepa-finalrun/runs/1p8b-ptjepa-t1190k-p50k-b1024-v6e32-20260922-062250). W&B reports `crashed`, with last logged step 1,208,750. GCS contains complete checkpoint metadata through **1,209,000**. The W&B and latest checkpoint configurations match exactly. The snapshot contains the student and its frozen teacher from periodic step **1,200,000** (24 promotions). The **initial teacher** is the `encoder` of frozen-teacher JEPA checkpoint **1,190,000**, not that checkpoint's own MAE teacher.
 
+The original MAE encoder at **666,000** is also measured with the full fresh audit. It is the teacher ancestor, not the periodic run's initial teacher.
+
 ## Final mean-pooled representation
 
 Fresh molecule-balanced audit. All 231,104 spectra were encoded; molecular centroids use the arithmetic mean of spectra sharing a full InChIKey. There are 22,746 training, 3,185 validation and 2,998 test molecules. The candidate database consists only of training molecules. Centroid results use molecular identity for averaging and are not single-spectrum deployment scores.
 
-| Measure | Initial teacher | Promoted teacher 1,200k | Student 1,209k |
-|---|---:|---:|---:|
-| MACCS macro AUROC | 0.8339 | 0.8138 | 0.8141 |
-| Functional-group AUROC | 0.8288 | 0.8052 | 0.8045 |
-| Mean property R² | 0.6464 | 0.6180 | 0.6175 |
-| Raw-cosine neighbor Tanimoto | 0.1756 | 0.1657 | 0.1655 |
-| Standardized neighbor Tanimoto | 0.1864 | 0.1698 | 0.1707 |
-| Whitened neighbor Tanimoto | 0.1972 | 0.1821 | 0.1836 |
-| Raw pair Spearman | 0.1914 | 0.3003 | 0.2985 |
-| Raw partial Spearman | 0.1528 | 0.2449 | 0.2434 |
-| Final-mean effective rank | 28.3256 | 78.9217 | 78.8013 |
-| Final-CLS effective rank | 12.1735 | 1.2779 | 1.2764 |
-| Repeat-spectrum mean-pool retrieval | 0.3603 | 0.2614 | 0.2621 |
-| 20% peak-dropout self-retrieval | 0.3242 | 0.9863 | 0.9883 |
-| Intensity-jitter self-retrieval | 0.9990 | 0.9980 | 0.9985 |
-| Zero-metadata self-retrieval | 0.9512 | 0.1899 | 0.2036 |
-| Single-spectrum raw neighbor Tanimoto | 0.1727 | 0.1610 | 0.1612 |
-| Single-spectrum ±5 Th neighbor Tanimoto | 0.1415 | 0.1370 | 0.1373 |
+| Measure | Original MAE 666k | JEPA initial teacher 1,190k | Promoted teacher 1,200k | Student 1,209k |
+|---|---:|---:|---:|---:|
+| MACCS macro AUROC | 0.8235 | 0.8339 | 0.8138 | 0.8141 |
+| Functional-group AUROC | 0.8190 | 0.8288 | 0.8052 | 0.8045 |
+| Mean property R² | 0.6218 | 0.6464 | 0.6180 | 0.6175 |
+| Raw-cosine neighbor Tanimoto | 0.1768 | 0.1756 | 0.1657 | 0.1655 |
+| Standardized neighbor Tanimoto | 0.1880 | 0.1864 | 0.1698 | 0.1707 |
+| Whitened neighbor Tanimoto | 0.1928 | 0.1972 | 0.1821 | 0.1836 |
+| Raw pair Spearman | 0.2311 | 0.1914 | 0.3003 | 0.2985 |
+| Raw partial Spearman | 0.2010 | 0.1528 | 0.2449 | 0.2434 |
+| Final-mean effective rank | 197.7287 | 28.3256 | 78.9217 | 78.8013 |
+| Final-CLS effective rank | 20.7039 | 12.1735 | 1.2779 | 1.2764 |
+| Repeat-spectrum mean-pool retrieval | 0.4374 | 0.3603 | 0.2614 | 0.2621 |
+| 20% peak-dropout self-retrieval | 0.9829 | 0.3242 | 0.9863 | 0.9883 |
+| Intensity-jitter self-retrieval | 0.9995 | 0.9990 | 0.9980 | 0.9985 |
+| Zero-metadata self-retrieval | 0.9961 | 0.9512 | 0.1899 | 0.2036 |
+| Single-spectrum raw neighbor Tanimoto | 0.1733 | 0.1727 | 0.1610 | 0.1612 |
+| Single-spectrum ±5 Th neighbor Tanimoto | 0.1424 | 0.1415 | 0.1370 | 0.1373 |
 
-All seven final-mean property R² values and all three label-budget MACCS scores are lower for the latest student. The student nevertheless exceeds the freshly evaluated binned-spectrum baseline (MACCS AUROC 0.6538; raw nearest-neighbor Tanimoto 0.1369). Random-molecule neighbor Tanimoto is 0.0951. Training-label permutation gives MACCS AUROC approximately 0.50 for all three encoders. Chemical information was not erased.
+All seven final-mean property R² values and all three label-budget MACCS scores are lower for the latest student than for the initial JEPA teacher. The student nevertheless exceeds the freshly evaluated binned-spectrum baseline (MACCS AUROC 0.6538; raw nearest-neighbor Tanimoto 0.1369). Random-molecule neighbor Tanimoto is 0.0951. Training-label permutation gives MACCS AUROC approximately 0.50 for all four encoders. Chemical information was not erased.
+
+
+## Original MAE → JEPA initial teacher → periodic endpoint
+
+All four checkpoints now have the same fresh molecule-balanced protocol, including the original MAE encoder at step 666,000. MAE supplied the frozen targets for the JEPA student at step 1,190,000, which then became the periodic run's initial teacher. Each student's training step count is local to its run; the periodic student started from random weights. These are checkpoint comparisons, not one continuously fine-tuned model or measurements of every promotion.
+
+Final-mean MACCS AUROC is **0.8235 → 0.8339 → 0.8141** for MAE, JEPA initial teacher and later periodic student. The intervening promoted teacher at 1,200,000 scores **0.8138**. Raw neighbor Tanimoto is **0.1768 → 0.1756 → 0.1655**. The full table above also compares properties, geometry, covariance, repeat spectra and all three perturbations.
+
+The initial JEPA checkpoint improves final-mean chemical probes over MAE, but the periodic endpoint falls below both on MACCS, functional groups and mean property R². Repeat-spectrum retrieval decreases from 43.7% (MAE) to 36.0% (initial JEPA) to 26.2% (periodic student). MAE already has 98.3% dropout self-retrieval, so the periodic endpoint's 98.8% mainly restores stability lost at the initial JEPA checkpoint (32.4%). Raw partial global chemical correlation instead moves 0.201 → 0.153 → 0.243.
+
+JEPA minus MAE MACCS AUROC is +0.01038 (95% CI +0.00720 to +0.01343); periodic student minus MAE is −0.00948 (−0.01406 to −0.00489). The JEPA–MAE raw-neighbor Tanimoto difference is −0.00127 (−0.00434 to +0.00161), which includes zero. Thus the initial JEPA gain is in chemical decodability, not an established raw-neighborhood gain.
+
+The initial JEPA phase and later periodic phase must be assessed separately. A gain over the MAE ancestor would not by itself establish a gain from periodic promotion. Paired confidence intervals below directly compare both transitions and the endpoint against MAE, using identical test molecules and labels. Dataset SHA-256, test identities and target arrays are checked before pairing.
+
+| Comparison | Endpoint | Difference | 95% paired molecule-bootstrap interval |
+|---|---|---:|---:|
+| JEPA initial − MAE | MACCS AUROC | +0.01038 | [+0.00720, +0.01343] |
+| JEPA initial − MAE | Raw neighbor Tanimoto | -0.00127 | [-0.00434, +0.00161] |
+| Periodic student − JEPA initial | MACCS AUROC | -0.01986 | [-0.02454, -0.01553] |
+| Periodic student − JEPA initial | Raw neighbor Tanimoto | -0.01006 | [-0.01324, -0.00694] |
+| Periodic student − MAE | MACCS AUROC | -0.00948 | [-0.01406, -0.00489] |
+| Periodic student − MAE | Raw neighbor Tanimoto | -0.01133 | [-0.01503, -0.00761] |
 
 ## Uncertainty
 
@@ -46,6 +70,8 @@ Paired differences below are latest student minus initial teacher. Rows are mole
 AUROC uses average ranks for ties and excludes targets with only one test class: 151 of 166 MACCS bits are test-evaluable. The bootstrap uses 500 paired molecule resamples, retaining this set and excluding any bit undefined within a resample. Neighbor means use 2,000 paired resamples. Correlation uses 99,955 distinct-molecule pairs sampled with seed 20260929; pairs share molecules and are not treated as independent observations. No misleading pair-bootstrap intervals are reported.
 
 ## What improved, and what did not
+
+The following changes compare the periodic endpoint to its initial JEPA teacher. The preceding section separately compares both to the original MAE.
 
 - **Recoverable chemical information deteriorates modestly.** Final-mean MACCS 0.8339 → 0.8141, functional groups 0.8288 → 0.8045, and mean property R² 0.6464 → 0.6175. Block-19 and final-CLS probes also decline. Label budgets of 227, 2,274 and 22,746 molecules all favor the initial teacher.
 - **Global chemical ordering improves.** Raw mean-pool cosine versus Morgan Tanimoto Spearman rises 0.1914 → 0.2985; after rank-linear adjustment for binned spectral cosine and precursor-mass gap, 0.1528 → 0.2434. This is positive evidence for one meaning of semantic organization. Partial correlation does not establish complete independence from acquisition or mass.
