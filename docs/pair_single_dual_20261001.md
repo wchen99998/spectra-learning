@@ -1,8 +1,8 @@
 # Pair→single information flow with pair distogram supervision
 
-Research date: 2026-10-01. Status: waves 1–9 are complete (wave 9's R=32 run was
+Research date: 2026-10-01. Status: waves 1–12 are complete (wave 9's R=32 run was
 cancelled once R ≤ 12 settled the question). The best recipe is now the library
-`training_mode="dual"` (Section 15).
+`training_mode="dual"` (Section 18).
 
 **Answer (seed 0):** add a pair distogram loss on the encoder pairs, and keep
 three pair→single paths: the attention bias, mean pair values, and the
@@ -24,14 +24,26 @@ confirm:
 AUC to 0.763 / 0.741, and keeps retrieval. Within-bin regression heads
 (Section 12) learn sub-bin position, but at 0.1 Da they change probe scores by
 at most 0.005, which is within plausible seed noise. They clearly help only
-with coarse 2 Da bins.
+with coarse 2 Da bins. Multi-scale CE (Section 14) lowers the exact-bin m/z
+CE but costs probe AUC and retrieval in all three seeds, so it stays off.
+Removing the per-sublayer post norms inside every block (Section 15) raises
+single AUC by 0.005–0.007 and pair retrieval by 1.6–2.9 pp in all three seeds,
+even though validation CE gets worse. The final output norms of the encoder
+and predictors make no difference.
+None of 22 alternative m/z input encodings beats the current one: 16
+learnable log-spaced Fourier frequencies (Section 16). More frequencies do not
+help either: 128 single-stream frequencies gain 0.003–0.005 AUC but lose
+pair retrieval, and 32–128 pair frequencies lose retrieval. Learnable frequencies
+and Fourier features both matter: fixed frequencies, RBF bumps, a 0.1 Da token
+embedding or no m/z features all lose probe AUC and retrieval in all three
+seeds.
 
 Code: the pilot, evaluation and report scripts
 (`scripts/pair_single_dual_pilot.py`, `scripts/pair_single_dual_eval.py`,
 `scripts/pair_single_dual_metadata.py`, `scripts/report_pair_single_dual.py`,
 `tests/test_pair_single_dual_pilot.py`, and the `pair_to_single_*` scripts of
 the earlier mechanism study) are kept at commit `78eb2c0` and removed from the
-tree. The winning recipe is implemented in the library (Section 15).
+tree. The winning recipe is implemented in the library (Section 18).
 
 ## 1. Question
 
@@ -796,7 +808,333 @@ Registers are not adopted. In this architecture the pair stream already
 provides $O(T^2)$ scratch state, and CLS (with `cls_edge`) is a global token,
 which plausibly covers what registers supply in ViTs.
 
-## 14. Reproduction
+## 14. Multi-scale cross entropy (wave 10; seeds 0–2, base + `cls_edge`, C=256, 0.1 Da)
+
+Multi-scale CE adds, for each width $w$, the cross entropy of the coarse bin
+formed by $w$ adjacent fine bins, with the coarse probability being the sum of
+the fine probabilities:
+
+$$
+\mathcal L = \mathrm{CE}_1 + \lambda \cdot \tfrac{1}{|W|}\sum_{w\in W}
+-\log \sum_{k \in G_w(k^\star)} p_k .
+$$
+
+The library implements it for the masked m/z head
+(`mae_mz_multiscale_widths`, `mae_mz_multiscale_weight`) and the distogram
+(`distogram_multiscale_widths`, `distogram_multiscale_weight`). Earlier
+library configs used $W = \{2, 4, 8, 16, 32, 64\}$ and $\lambda = 1$, which
+at 0.1 Da spans 0.2–6.4 Da groups. Waves 1–9 ran with it off. Here the pilot's
+`--multiscale mz|dist|mz+dist`, `--multiscale-weight` and
+`--multiscale-widths` flags set those four library fields. The rerun base
+seed 0 reproduces the wave-7 run exactly.
+
+The MAE and dist columns are the exact-bin (fine) cross entropies. The
+multi-scale term is not included in them.
+
+| Arm | Seeds | MAE | dist | m/z bin acc. | sAUC t / c | pAUC t / c | s@1 t / c | p@1 t |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- | ---: |
+| base | 0–2 | 4.112 | **3.317** | **24.0%** | **0.744 / 0.729** | **0.762 / 0.743** | **25.8 / 38.0** | **19.7** |
+| + mz+dist, λ=1, W=2–64 | 0–2 | **3.907** | 3.323 | 23.8% | 0.736 / 0.725 | 0.756 / 0.737 | 24.3 / 35.4 | 18.8 |
+| + mz, λ=1 | 0 | 3.904 | 3.337 | 23.5% | 0.734 / 0.721 | 0.754 / 0.737 | 25.0 / 35.8 | 18.3 |
+| + dist, λ=1 | 0 | 4.089 | 3.287 | 24.2% | 0.744 / 0.726 | 0.761 / 0.741 | 26.3 / 39.3 | 19.4 |
+| + mz+dist, λ=0.3 | 0 | 3.964 | 3.311 | 24.2% | 0.741 / 0.728 | 0.762 / 0.736 | 26.5 / 39.8 | 19.7 |
+| + mz+dist, λ=1, W=2,4,8 | 0 | 3.933 | 3.295 | 24.4% | 0.740 / 0.732 | 0.761 / 0.742 | 25.5 / 37.7 | 18.3 |
+| base, seed 0 only | 0 | 4.098 | 3.301 | 24.1% | 0.742 / 0.727 | 0.763 / 0.741 | 26.9 / 39.7 | 20.0 |
+
+(The first two rows are means over seeds 0–2. Seed SD of the base is
+0.0015–0.0018 AUC and 1.8 / 2.4 pp single retrieval.)
+
+Seed-matched differences, multi-scale on both heads (λ=1) minus base:
+
+| Metric | Seed 0 | Seed 1 | Seed 2 | Mean |
+| --- | ---: | ---: | ---: | ---: |
+| MAE (exact CE) | −0.205 | −0.216 | −0.194 | −0.205 |
+| distogram (exact CE) | +0.015 | +0.010 | −0.008 | +0.006 |
+| single AUC test / confirm | −0.002 / −0.002 | −0.012 / −0.005 | −0.012 / −0.005 | −0.009 / −0.004 |
+| pair AUC test / confirm | −0.004 / −0.004 | −0.007 / −0.008 | −0.006 / −0.007 | −0.005 / −0.006 |
+| single top-1 test / confirm (pp) | −1.5 / −2.6 | −1.4 / −1.5 | −1.4 / −3.5 | −1.4 / −2.5 |
+| pair top-1 test (pp) | −1.6 | −0.4 | −0.6 | −0.9 |
+
+Findings:
+
+1. **Multi-scale CE does not improve the representation.** On both heads it
+   lowers every probe metric in every seed: −0.009 / −0.004 single AUC,
+   −0.005 / −0.006 pair AUC, −1.4 / −2.5 pp single retrieval. The AUC losses
+   are 3–5× the base seed SD.
+2. **It improves calibration, not accuracy.** Exact-bin m/z CE falls by 0.205
+   in every seed, but top-1 bin accuracy does not change (23.8% vs 24.0%).
+   The coarse terms move probability mass onto neighbouring bins, which makes
+   misses cheaper without making hits more frequent.
+3. **The m/z term causes the loss.** m/z alone costs 0.008 / 0.006 single AUC
+   and 1.9 / 3.9 pp retrieval (seed 0). The distogram term alone is
+   neutral: within ±0.002 AUC, −0.6 pp retrieval, and −0.014 distogram CE.
+4. **Weaker or narrower variants are neutral at best.** λ=0.3 and W=2,4,8
+   keep AUC within about 0.006 of the base, but still lose 0.4–2.0 pp of
+   retrieval on at least one fold.
+
+**Recommendation.** Keep multi-scale CE off for both heads, as in the 1B
+configuration. A distogram-only term is the only variant that is not worse,
+and it shows no gain to adopt.
+
+## 15. Output norms (wave 11; seeds 0–2, base + `cls_edge`, C=256, 0.1 Da)
+
+The model has two kinds of output norm:
+
+- **Final norms.** These normalise what the encoder and predictors emit: the
+  encoder's single `final_norm` (RMSNorm without scale) and pair
+  `final_pair_norm`, the MAE predictor's `predictor_final_norm`, and the pair
+  predictor's `predictor_pair_norm`.
+- **Block post norms.** Every residual sublayer adds a normalised update,
+  $h \leftarrow h + \mathrm{RMSNorm}(f(h))$ (the scale starts at 1). These are
+  `tri_mul_out_post_norm`, `tri_mul_in_post_norm`,
+  `pair_transition_post_norm`, `single_attention_post_norm` and
+  `single_transition_post_norm` in the encoder fastmixer blocks;
+  `attention_post_norm` and `ffn_post_norm` in the MAE predictor's
+  cross-attention blocks; and the triangle and transition post norms in the
+  pair-predictor blocks.
+
+The pilot flag `--no-norms final|post|final+post` sets the three
+`*_apply_final_norm` settings to False, replaces every `*_post_norm` in the
+encoder and both predictors with identity, or does both. The pre-norms inside
+each sublayer are kept. The base runs are the wave-10 base runs (the flag is
+off, so the computation is unchanged).
+
+| Arm | MAE | dist | m/z bin acc. | sAUC t / c | pAUC t / c | s@1 t / c | p@1 t / c |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- |
+| base | **4.112** | **3.317** | 24.0% | 0.744 / 0.729 | **0.762** / 0.743 | 25.8 / 38.0 | 19.7 / 29.1 |
+| no final norms | 4.128 | 3.331 | 24.2% | 0.744 / 0.728 | 0.761 / **0.744** | 26.1 / 38.1 | 19.6 / 29.4 |
+| no block post norms | 4.145 | 3.341 | **24.4%** | **0.749** / 0.735 | 0.761 / 0.742 | 26.2 / 38.3 | 21.3 / 31.2 |
+| no final + no post | 4.185 | 3.397 | 23.8% | **0.749 / 0.736** | 0.760 / **0.744** | **27.1 / 40.0** | **21.9 / 31.9** |
+
+(Means over seeds 0–2. Base seed SDs: 0.0015 single AUC, 0.0018 pair AUC,
+1.8 / 2.4 pp single retrieval, 0.4 / 0.3 pp pair retrieval.)
+
+Seed-matched differences from the base (seeds 0 / 1 / 2, then the mean):
+
+| Metric | no final | no post | no final + no post |
+| --- | --- | --- | --- |
+| MAE (val CE) | +0.029 / +0.008 / +0.014 → +0.017 | +0.054 / +0.044 / +0.002 → +0.033 | +0.108 / +0.068 / +0.044 → +0.073 |
+| distogram (val CE) | +0.015 / +0.046 / −0.020 → +0.014 | +0.029 / +0.051 / −0.006 → +0.025 | +0.112 / +0.102 / +0.026 → +0.080 |
+| single AUC test | −0.000 / +0.000 / +0.001 → +0.000 | +0.006 / +0.004 / +0.006 → +0.005 | +0.009 / +0.003 / +0.003 → +0.005 |
+| single AUC confirm | +0.001 / −0.005 / +0.003 → −0.001 | +0.008 / +0.004 / +0.007 → +0.006 | +0.016 / +0.005 / −0.000 → +0.007 |
+| pair AUC test | +0.000 / −0.000 / −0.004 → −0.001 | −0.005 / +0.004 / −0.001 → −0.001 | −0.005 / +0.001 / −0.001 → −0.002 |
+| pair AUC confirm | +0.002 / +0.000 / +0.000 → +0.001 | +0.003 / −0.003 / −0.004 → −0.001 | +0.004 / +0.001 / −0.004 → +0.000 |
+| single top-1 test (pp) | +1.1 / −0.6 / +0.7 → +0.4 | +0.0 / −1.4 / +2.7 → +0.4 | +0.6 / +0.4 / +2.8 → +1.3 |
+| single top-1 confirm (pp) | +1.5 / −1.7 / +0.5 → +0.1 | +0.2 / −2.4 / +3.1 → +0.3 | +0.7 / +1.6 / +3.8 → +2.1 |
+| pair top-1 test (pp) | −0.3 / −0.2 / +0.4 → −0.0 | +1.0 / +1.5 / +2.3 → +1.6 | +2.3 / +2.1 / +2.4 → +2.3 |
+| pair top-1 confirm (pp) | +0.1 / +0.2 / +0.8 → +0.3 | +2.2 / +1.6 / +2.6 → +2.1 | +2.9 / +3.0 / +2.8 → +2.9 |
+
+Findings:
+
+1. **The final output norms do not matter.** Without them, every probe
+   difference stays within one base seed SD and changes sign between seeds.
+   Validation CE rises by at most 0.017.
+2. **The block post norms hurt the representation.** Without them:
+   - Single AUC rises by 0.005 / 0.006 in every seed, 3–4× the seed SD.
+   - Pair top-1 retrieval rises by 1.6 / 2.1 pp in every seed, about 5× the
+     seed SD.
+   - Pair AUC is unchanged, and single retrieval is mixed: seed 1 loses
+     1.4–2.4 pp.
+3. **Removing both gives the largest gains.**
+   - Pair top-1 rises by 2.3 / 2.9 pp and single top-1 by 1.3 / 2.1 pp, all
+     six differences positive.
+   - Single AUC rises by 0.005 / 0.007; five of six differences are positive,
+     and seed 2 confirm is flat.
+   - Without the post norms, the final norms are the only normalisation
+     between the encoder's last residual stream and the readout. Removing them
+     too helps retrieval slightly, although alone they are neutral.
+4. **Pretraining loss and representation quality diverge again.** Removing
+   both kinds of norm raises validation CE in every seed (+0.073 MAE, +0.080
+   distogram), yet improves the probes. As with multi-scale CE (Section 14),
+   the exact-bin CE is not a reliable guide to downstream quality.
+
+A plausible mechanism, not tested here: with post norms, every sublayer adds
+an update of about unit RMS, however little it contributes. Over 6 blocks × 4–5
+sublayers, these fixed-size increments may dilute the earlier,
+peak-identity-bearing content of the residual stream.
+
+**Caveats and recommendation.** This is a 27M-parameter, 6-layer, 20k-step
+pilot. Post (sandwich) norms are mainly a stability device for deep, large
+models: the 1B and 2.3B runs have 21 and 36 encoder blocks and bf16 compute, and those
+depths were not tested without them. The library has no switch for them yet;
+the post norms are always built. Before changing the production recipe, the
+next steps are:
+
+- Add a `*_post_norm` switch to the library.
+- Check stability and probes without post norms at depth (a 12–24-layer pilot
+  or the 100M configuration).
+- Split encoder versus predictor post norms, to see which carries the effect.
+
+## 16. Input m/z representation (wave 12; seeds 0–2, base + `cls_edge`, C=256, 0.1 Da)
+
+The encoder sees m/z in two places:
+
+- **Single stream.** `PeakFeatureEmbedder` maps each peak's m/z (in Da)
+  through `FourierFeatures`: $[\cos 2\pi m b_k, \sin 2\pi m b_k]$ with
+  wavelengths $1/b_k$ log-spaced over 0.003–1000 Da, 16 of them. An MLP then
+  maps these to half the token width; the raw scalar m/z and the intensities
+  feed the other half.
+- **Pair stream.** `PairFeatureEmbedder` applies a second Fourier block
+  (0.01–1000 Da, 16 wavelengths) to the difference $d$, $|d|$ and the
+  complement $m_i + m_j - M$, and a relative block (0.001–1, 16) to
+  $d / M$, where $M$ is the precursor mass.
+
+The frequencies $b_k$ are `nnx.Param`s, so they are trained. The 1B and 2.3B
+configurations use exactly this setup.
+
+New pilot flags:
+
+- `--mz-features log|gauss|rbf|harmonic|rbf_harmonic|token|none` with
+  `--mz-freqs`, `--mz-band`, `--mz-sigma`, `--mz-harmonics` and
+  `--mz-token-bin`.
+- `--mz-learnable off`, which turns every encoder frequency into a fixed
+  buffer.
+- `--freq-decay off`, which excludes frequencies from AdamW weight decay.
+- `--pair-band` and `--pair-freqs`.
+
+Only the m/z features and the MLP's input width change; the MLP widths stay
+the same. `harmonic` uses harmonics $k = 1..16$ of 1 Da, which follow the
+nominal-mass lattice and so encode the mass defect, plus 16 log-spaced
+wavelengths from 2 to 1000 Da. RBF centres sit on an even 0–1000 Da grid,
+with width equal to the spacing.
+
+A base rerun with an explicit default flag reproduces the wave-10 base
+exactly: training losses are bit-identical, and every evaluation difference
+is 0.0000. The pilot is deterministic, so the differences below are effects
+of the encoding, and seed is the only noise.
+
+| Arm | MAE | dist | m/z acc. | sAUC t / c | pAUC t / c | s@1 t / c | p@1 t / c |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- |
+| base: log Fourier, 16 freqs, 0.003–1000 Da, learnable | 4.112 | 3.317 | 24.0% | 0.744 / 0.729 | 0.762 / 0.743 | 25.8 / 38.0 | 19.7 / 29.1 |
+| frequencies fixed (single and pair) | 4.152 | 3.345 | 24.0% | 0.739 / 0.726 | 0.756 / 0.740 | 23.8 / 34.9 | 18.2 / 26.4 |
+| learnable, no weight decay (as the library) | 4.102 | 3.293 | 24.4% | 0.743 / 0.728 | 0.760 / 0.743 | 25.3 / 36.8 | 19.2 / 28.4 |
+| log Fourier, 32 freqs | 4.124 | 3.322 | 24.1% | 0.744 / 0.728 | 0.761 / 0.740 | 25.1 / 36.7 | 18.9 / 27.9 |
+| log Fourier, 64 freqs | 4.126 | 3.319 | 24.0% | 0.742 / 0.726 | 0.761 / 0.739 | 26.0 / 38.7 | 19.3 / 28.5 |
+| log Fourier, 128 freqs | 4.121 | 3.301 | 24.7% | 0.747 / 0.734 | 0.763 / 0.746 | 25.2 / 38.1 | 18.8 / 28.4 |
+| log Fourier, 256 freqs (library default) | 4.163 | 3.317 | 23.6% | 0.744 / 0.731 | 0.759 / 0.744 | 25.5 / 38.7 | 19.3 / 28.9 |
+| log band 0.001–1000 Da | 4.097 | 3.317 | 24.7% | 0.743 / 0.730 | 0.762 / 0.742 | 24.7 / 36.5 | 17.9 / 26.6 |
+| log band 0.01–1000 Da | 4.099 | 3.312 | 24.3% | 0.741 / 0.730 | 0.758 / 0.741 | 24.5 / 35.8 | 17.6 / 26.4 |
+| log band 0.1–1000 Da | 4.104 | 3.312 | 24.4% | 0.741 / 0.726 | 0.760 / 0.741 | 24.4 / 35.7 | 18.6 / 27.8 |
+| Gaussian RFF, 64, σ=1 /Da | 4.119 | 3.335 | 24.0% | 0.745 / 0.729 | 0.760 / 0.743 | 25.5 / 38.2 | 18.7 / 27.3 |
+| Gaussian RFF, 64, σ=10 /Da | 4.138 | 3.320 | 24.0% | 0.741 / 0.727 | 0.758 / 0.741 | 25.4 / 38.3 | 18.5 / 27.0 |
+| 1 Da harmonics k=1–16 + 16 log 2–1000 Da | 4.107 | 3.297 | 24.5% | 0.743 / 0.728 | 0.761 / 0.742 | 26.5 / 39.0 | 19.2 / 28.0 |
+| RBF, 256 centres (3.9 Da) | 4.237 | 3.395 | 21.4% | 0.738 / 0.726 | 0.757 / 0.740 | 24.1 / 35.3 | 18.9 / 27.2 |
+| RBF 256 + 1 Da harmonics | 4.183 | 3.313 | 22.6% | 0.743 / 0.732 | 0.761 / 0.745 | 24.9 / 37.2 | 19.5 / 28.8 |
+| token embedding, 0.1 Da bins | 4.214 | 3.354 | 23.0% | 0.740 / 0.726 | 0.757 / 0.741 | 23.9 / 34.9 | 18.2 / 26.6 |
+| no m/z features (raw scalar only) | 4.484 | 3.421 | 15.7% | 0.745 / 0.727 | 0.758 / 0.738 | 18.4 / 27.6 | 18.1 / 26.1 |
+| pair band 0.001–1000 Da | 4.106 | 3.325 | 24.1% | 0.741 / 0.725 | 0.760 / 0.738 | 24.3 / 35.6 | 17.9 / 26.8 |
+| pair band 0.1–1000 Da | 4.120 | 3.336 | 23.8% | 0.740 / 0.724 | 0.759 / 0.738 | 24.4 / 36.3 | 18.6 / 28.2 |
+| pair Fourier, 32 freqs | 4.096 | 3.338 | 24.1% | 0.743 / 0.728 | 0.762 / 0.744 | 25.8 / 38.0 | 18.5 / 27.5 |
+| pair Fourier, 64 freqs | 4.099 | 3.322 | 24.4% | 0.741 / 0.727 | 0.761 / 0.744 | 24.9 / 36.5 | 18.2 / 27.3 |
+| pair Fourier, 128 freqs | 4.102 | 3.327 | 23.9% | 0.743 / 0.726 | 0.762 / 0.745 | 24.5 / 35.8 | 17.9 / 27.0 |
+| single and pair Fourier, 64 freqs each | 4.124 | 3.317 | 24.2% | 0.744 / 0.725 | 0.760 / 0.740 | 25.7 / 38.4 | 18.8 / 27.8 |
+
+(Means over seeds 0–2. Base seed SDs: 0.0015 single AUC, 0.0018 pair AUC,
+1.8 / 2.4 pp single top-1, 0.4 / 0.3 pp pair top-1.)
+
+Seed-matched mean differences from the base. ³ marks differences with the
+same sign in all three seeds:
+
+| Arm | MAE | dist | sAUC t / c | pAUC t / c | s@1 t / c (pp) | p@1 t / c (pp) |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| frequencies fixed (single and pair) | +0.040³ | +0.028³ | −0.0052³ / −0.0023 | −0.0053³ / −0.0035³ | −1.9³ / −3.1³ | −1.4³ / −2.6³ |
+| learnable, no weight decay (as the library) | −0.010 | −0.024 | −0.0007 / −0.0007 | −0.0020³ / +0.0001 | −0.4 / −1.1 | −0.5 / −0.7 |
+| log Fourier, 32 freqs | +0.012³ | +0.005 | −0.0001 / −0.0001 | −0.0005 / −0.0036³ | −0.7 / −1.3 | −0.8³ / −1.2³ |
+| log Fourier, 64 freqs | +0.015 | +0.003 | −0.0016 / −0.0026 | −0.0006 / −0.0039³ | +0.2 / +0.7 | −0.3 / −0.6 |
+| log Fourier, 128 freqs | +0.009 | −0.016 | +0.0026³ / +0.0054³ | +0.0009 / +0.0028³ | −0.6 / +0.1 | −0.9³ / −0.7 |
+| log Fourier, 256 freqs (library default) | +0.051³ | −0.000 | −0.0002 / +0.0029 | −0.0022 / +0.0002 | −0.2 / +0.7 | −0.3 / −0.2 |
+| log band 0.001–1000 Da | −0.014³ | +0.000 | −0.0006 / +0.0016³ | −0.0001 / −0.0012 | −1.0 / −1.4 | −1.7³ / −2.5³ |
+| log band 0.01–1000 Da | −0.012 | −0.004 | −0.0030 / +0.0012 | −0.0033³ / −0.0022 | −1.3 / −2.2³ | −2.0³ / −2.7³ |
+| log band 0.1–1000 Da | −0.008 | −0.005 | −0.0027 / −0.0020³ | −0.0022 / −0.0026³ | −1.4³ / −2.2³ | −1.0³ / −1.3³ |
+| Gaussian RFF, 64, σ=1 /Da | +0.008 | +0.018 | +0.0009 / +0.0003 | −0.0018³ / −0.0007 | −0.3 / +0.2 | −0.9³ / −1.8³ |
+| Gaussian RFF, 64, σ=10 /Da | +0.026³ | +0.003 | −0.0033³ / −0.0016 | −0.0037 / −0.0027³ | −0.4 / +0.3 | −1.2³ / −2.1³ |
+| 1 Da harmonics k=1–16 + 16 log 2–1000 Da | −0.005 | −0.020 | −0.0009³ / −0.0002 | −0.0003 / −0.0018³ | +0.7 / +1.0 | −0.4³ / −1.1³ |
+| RBF, 256 centres (3.9 Da) | +0.125³ | +0.078³ | −0.0063³ / −0.0025 | −0.0043 / −0.0029³ | −1.7³ / −2.6³ | −0.7 / −1.9³ |
+| RBF 256 + 1 Da harmonics | +0.072³ | −0.004 | −0.0011³ / +0.0033³ | −0.0009 / +0.0018 | −0.9 / −0.8 | −0.2 / −0.3 |
+| token embedding, 0.1 Da bins | +0.103³ | +0.038 | −0.0045³ / −0.0027 | −0.0051³ / −0.0020 | −1.8 / −3.1 | −1.5³ / −2.5³ |
+| no m/z features (raw scalar only) | +0.372³ | +0.105³ | +0.0008 / −0.0013³ | −0.0036 / −0.0051³ | −7.4³ / −10.4³ | −1.6³ / −3.0³ |
+| pair band 0.001–1000 Da | −0.006 | +0.008 | −0.0031³ / −0.0038³ | −0.0015 / −0.0051³ | −1.4³ / −2.4³ | −1.8³ / −2.3³ |
+| pair band 0.1–1000 Da | +0.008³ | +0.019³ | −0.0045³ / −0.0043³ | −0.0028 / −0.0055³ | −1.3³ / −1.6³ | −1.0³ / −0.9³ |
+| pair Fourier, 32 freqs | −0.016³ | +0.022 | −0.0012 / −0.0005 | +0.0005 / +0.0004³ | +0.1 / +0.1 | −1.2³ / −1.5³ |
+| pair Fourier, 64 freqs | −0.013 | +0.005 | −0.0033 / −0.0017 | −0.0003 / +0.0003 | −0.8 / −1.5³ | −1.4³ / −1.8³ |
+| pair Fourier, 128 freqs | −0.010 | +0.011 | −0.0015 / −0.0021³ | −0.0001 / +0.0019 | −1.3³ / −2.2³ | −1.7³ / −2.1³ |
+| single and pair Fourier, 64 freqs each | +0.013 | +0.001 | −0.0004 / −0.0034³ | −0.0016 / −0.0035³ | −0.0 / +0.4 | −0.9³ / −1.3³ |
+
+Findings:
+
+1. **The current encoding is at least as good as every alternative.** No
+   arm improves probe AUC or retrieval consistently. Eighteen of the 22 arms
+   lose pair top-1 in all three seeds on at least one fold, by 0.4–3.0 pp.
+   The other four are within noise: 64 and 256 log frequencies,
+   RBF + harmonics, and no frequency decay.
+2. **Fourier features are needed.**
+   - With only the raw scalar m/z, MAE rises by 0.37 and bin accuracy falls
+     by 8.3 pp. Single retrieval drops by 7.4 / 10.4 pp, although single
+     MACCS AUC does not change, because the substructure probe barely uses
+     fine m/z.
+   - RBF bumps and the 0.1 Da token embedding both lose 0.004–0.006 single
+     AUC and 1.7–3.1 pp single retrieval. Neither interpolates between
+     neighbouring masses the way sinusoids do.
+3. **Learnable frequencies matter.** Fixing them costs 0.005 single and pair
+   AUC and 1.4–3.1 pp retrieval, in all three seeds on most metrics.
+   - The learned wavelengths show where the learning happens. In the base
+     runs, wavelengths of 2 Da and above move a lot and differently in each
+     seed (1000 → 650–680 Da, 183 → 170–195 Da).
+   - Wavelengths of 0.5 Da and below all stretch by exactly 3.3%, the same in
+     every seed. That is the pilot's AdamW decay on every parameter,
+     $\exp(-0.01 \sum \eta) \approx 0.967$.
+   - The library decays only 2-D `weight` leaves, so its frequencies never
+     decay. Running the pilot that way (`--freq-decay off`) is within noise
+     of the base: −0.002 pair test AUC, −0.4 to −1.1 pp retrieval, with mixed
+     signs. The decay is therefore an unimportant pilot artefact, and the
+     production setup is equivalent.
+4. **Changing the band trades CE for retrieval.**
+   - Moving the single-stream band edge to 0.001, 0.01 or 0.1 Da lowers MAE
+     by 0.008–0.014 and raises bin accuracy by 0.3–0.7 pp in all three
+     seeds.
+   - Each of these changes also costs 1.0–2.7 pp pair retrieval in all three
+     seeds, so lower CE again does not mean a better representation.
+   - The band edge sets the spacing of all 16 wavelengths, so these arms do
+     not isolate the short wavelengths themselves. Those are numerically
+     noisy in float32 on GPU: the maximum cos error over m/z up to 1000 Da is
+     0.67 at 0.001 Da, 0.22 at 0.003 Da, 0.08 at 0.01 Da and < 0.01 above
+     0.1 Da.
+5. **The pair band is already right.** Widening the pair band to 0.001 Da or
+   narrowing it to 0.1 Da costs 0.002–0.005 AUC and 0.9–2.4 pp retrieval,
+   mostly in all three seeds. More pair frequencies do not help either: 32,
+   64 and 128 change AUC by at most 0.003 but lose 1.2–2.1 pp pair retrieval
+   in all three seeds, and the loss grows with the count.
+6. **Alternatives built on the 1 Da lattice tie the base.**
+   - Harmonics of 1 Da lower distogram CE by 0.020 and raise bin accuracy by
+     0.5 pp. They gain 0.7 / 1.0 pp single retrieval but lose 0.4 / 1.1 pp
+     pair retrieval.
+   - Adding them to the RBF grid recovers most of what the RBF alone loses,
+     and gives the only consistent AUC gain here: +0.0033 single confirm
+     AUC, 3/3 seeds. MAE stays 0.07 worse.
+   - Neither is a clear improvement.
+
+7. **More single-stream frequencies do not help on balance.** With the same
+   0.003–1000 Da band:
+   - 32 and 64 frequencies gain nothing: AUC changes by 0 to −0.004 and
+     pair retrieval by −0.3 to −1.2 pp.
+   - 128 frequencies are the only arm in the wave with AUC gains in all
+     three seeds: +0.0026 / +0.0054 single and +0.0028 pair confirm AUC.
+     Distogram CE drops by 0.016, but pair test top-1 falls by 0.9 pp in all
+     three seeds.
+   - 256 (the library default) raises MAE by 0.051 in all three seeds and
+     is otherwise within noise.
+   - The AUC changes do not trend with the count (64 is below 16, 128 above,
+     256 level), so the 128 gain may not survive more seeds or scale.
+   - Raising both streams to 64 frequencies loses 0.003 AUC on the confirm
+     fold and 0.9 / 1.3 pp pair retrieval in all three seeds.
+
+**Recommendation.** Keep the current m/z encoding, with 16 learnable
+frequencies, for single and pair inputs. No input representation tested here
+is worth adopting. 128 single-stream frequencies are the only candidate worth
+a confirmation run, and only if MACCS AUC matters more than pair retrieval. The most promising lead is to add 1 Da harmonics to the
+current log grid rather than replacing it, which this wave did not test.
+
+## 17. Reproduction
 
 The pilot scripts live at commit `78eb2c0` (`git checkout 78eb2c0` first).
 
@@ -832,11 +1170,15 @@ Isambard launcher: `~/spectra-p2s/p2s_queue.sbatch` (`SPECS="arm:seed …"`,
 `SLOTS` runs per GPU). Outputs for each wave are under
 `/scratch/u6rb/wuhao.u6rb/p2s/` (`wave1`, `wave2`, `wave3_ts`, `wave4_bins`,
 `wave5_pd256`, `wave6_pd256_bin01`, `wave7_meta_sites`, `wave8_offsets`,
-`wave9_registers`). Evaluation JSON files are copied to
+`wave9_registers`, `wave10_multiscale`, `wave11_norms`, `wave12_mz`). The wave-10 to
+wave-12 pilot flags (`--multiscale*`, `--no-norms`, `--mz-*`, `--freq-decay`,
+`--pair-band`, `--pair-freqs`) are not in `78eb2c0`; apply
+`artifacts/pair_single_dual_20261001/pilot_78eb2c0_waves10-12.patch`
+(`git apply`) after checking out that commit. Evaluation JSON files are copied to
 `artifacts/pair_single_dual_20261001/<wave>/`. Tests and evaluation run as
 Slurm jobs, never on the login node.
 
-## 15. Library implementation (`training_mode="dual"`)
+## 18. Library implementation (`training_mode="dual"`)
 
 The best recipe (`dual_bias_mean_gated`, C=D, 0.1 Da bins, `cls_edge`
 metadata) is a `PeakSetJEPAJax` training mode, trained by the standard JAX
@@ -877,6 +1219,16 @@ spectra per GPU:
 - The fastmixer triangle contraction runs as a batched GEMM on GPU. The
   broadcast-multiply-reduce form ran out of memory, and a fused reduction was
   10x slower at 39 or more tokens.
+- The 0.1 Da distogram has 10,000 classes. At stage 2 that is about
+  112k scored pairs per GPU, or 4.5 GB of f32 logits.
+  `distogram_ce_chunk_rows = 8192` fuses the head with the cross entropy over
+  row chunks and recomputes each chunk in the backward pass. The step's peak
+  is in the predictor backward, so it saves only 0.5 GB (72.7 → 72.2 GB per
+  GPU at 63 peaks), with no throughput change.
+- `fastmixer_predictor_capacity_multiple = 4` pads the stage-2 predictor
+  capacity from 55 to 56 tokens. One pair-predictor block runs in 150 ms
+  instead of 163 ms. The full step gains 0.5% (139.2 → 139.9 spectra/s per
+  node) and peak memory rises by 1.5 GB.
 
 - From 4 nodes up, the gradient all-reduce dominated: 16 GPUs ran 199
   spectra/s (5.2 s per step, 64 per GPU) and 32 GPUs about 9 s per step.
