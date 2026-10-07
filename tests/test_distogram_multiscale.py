@@ -294,3 +294,47 @@ def test_distogram_remat_is_exact_in_value_and_gradient():
         np.testing.assert_array_equal(
             np.asarray(stored_leaf), np.asarray(recomputed_leaf)
         )
+
+
+@pytest.mark.parametrize("widths", [(), WIDTHS])
+def test_chunked_distogram_ce_matches_unchunked(widths):
+    """Scoring pairs in padded chunks must give the same loss and gradients."""
+    shared = dict(
+        distogram_loss_weight=1.0,
+        distogram_pair_dim=8,
+        distogram_multiscale_widths=widths,
+        distogram_multiscale_weight=1.0 if widths else 0.0,
+        mae_loss_weight=0.0,
+    )
+    whole = build_model_from_config(_config(**shared))
+    # 5 does not divide the number of scored pairs, so the last chunk is padded.
+    chunked = build_model_from_config(_config(**shared, distogram_ce_chunk_rows=5))
+    nnx.update(chunked, nnx.state(whole))
+    batch = _batch(seed=3)
+
+    whole_metrics = whole(batch)
+    chunked_metrics = chunked(batch)
+    assert set(whole_metrics) == set(chunked_metrics)
+    for name in whole_metrics:
+        np.testing.assert_allclose(
+            float(chunked_metrics[name]), float(whole_metrics[name]),
+            rtol=1e-6, err_msg=name,
+        )
+
+    def gradients(model):
+        graphdef, params, static = nnx.split(model, nnx.Param, ...)
+
+        def loss(values):
+            return nnx.merge(graphdef, values, static)(batch)["loss"]
+
+        return jax.tree.leaves(jax.grad(loss)(params))
+
+    for whole_leaf, chunked_leaf in zip(
+        gradients(whole), gradients(chunked), strict=True
+    ):
+        # The head gradient sums over chunks in a different order.
+        whole_leaf = np.asarray(whole_leaf)
+        np.testing.assert_allclose(
+            np.asarray(chunked_leaf), whole_leaf,
+            rtol=0, atol=1e-6 * max(np.abs(whole_leaf).max(), 1e-6),
+        )

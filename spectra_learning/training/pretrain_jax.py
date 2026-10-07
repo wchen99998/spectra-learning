@@ -1767,8 +1767,11 @@ class _JaxTrainingLoop:
             train_steps = []
             eval_steps = []
             teacher_target_steps = []
-        for capacity in self.mask_capacities:
+        for stage, capacity in zip(self.mask_stages, self.mask_capacities, strict=True):
             self.model.set_fastmixer_capacities(*capacity)
+            self.model.set_activation_checkpoint_saved_fraction(
+                stage.activation_checkpoint_saved_fraction
+            )
             stage_graphdef = nnx.graphdef(self.model)
             train_step, eval_step, teacher_target_step = make_steps(stage_graphdef)
             train_steps.append(train_step)
@@ -1776,6 +1779,9 @@ class _JaxTrainingLoop:
             teacher_target_steps.append(teacher_target_step)
         if self.use_mask_schedule:
             self.model.set_fastmixer_capacities(*self.mask_capacities[0])
+            self.model.set_activation_checkpoint_saved_fraction(
+                self.mask_stages[0].activation_checkpoint_saved_fraction
+            )
         if self.use_sharded_step:
             params, static_state = replicate_trainable_state_on_mesh(
                 self.model,
@@ -1901,7 +1907,7 @@ class _JaxTrainingLoop:
         logging.info(
             "%s mask stage %d: %s num_peaks=%d "
             "encoder_tokens=%d predictor_tokens=%d target_tokens=%d "
-            "accumulation_steps=%d",
+            "accumulation_steps=%d checkpoint_saved_fraction=%.2f",
             objective_label,
             stage_index + 1,
             mask_description,
@@ -1910,6 +1916,7 @@ class _JaxTrainingLoop:
             predictor_tokens,
             target_tokens,
             stage.gradient_accumulation_steps,
+            stage.activation_checkpoint_saved_fraction,
         )
         return True
 

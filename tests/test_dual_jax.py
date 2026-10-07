@@ -13,6 +13,10 @@ from ml_collections import config_dict
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.mask_schedule import jepa_mask_stages
+from spectra_learning.models.common_jax import (
+    block_activation_checkpoint_mode,
+    every_nth_checkpoint_mode,
+)
 from spectra_learning.models.fastmixer_capacity import pairmixer_fast_stage_capacities
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.pair_to_single_jax import PairToSingleBridge
@@ -227,19 +231,24 @@ def test_dual_trains_every_path():
         assert sum(value for key, value in flat.items() if name in key) > 0, name
 
 
-@pytest.mark.parametrize("ordered_mode", ["ordered", "ordered_saved"])
-def test_ordered_checkpointing_matches_plain_gradients(ordered_mode):
+@pytest.mark.parametrize(
+    ("ordered_mode", "every_n", "saved_fraction"),
+    [("ordered", 1, 0.0), ("ordered_saved", 1, 0.0), ("ordered", 2, 0.0), ("ordered", 1, 0.5)],
+)
+def test_ordered_checkpointing_matches_plain_gradients(ordered_mode, every_n, saved_fraction):
     """Ordered recomputation (the GPU remat mode) changes memory, not values."""
     batch = {k: jnp.asarray(v) for k, v in _batch(7).items()}
 
-    def loss_and_grads(mode: str):
+    def loss_and_grads(mode: str, every_n: int = 1, saved_fraction: float = 0.0):
         model = PeakSetJEPAJax(
             rngs=nnx.Rngs(0),
             **_dual_kwargs(),
             activation_checkpoint_mode=mode,
+            activation_checkpoint_every_n_layers=every_n,
             activation_checkpoint_modules=("encoder", "predictor", "distogram"),
         )
         model.set_fastmixer_capacities(6, 8, 3)
+        model.set_activation_checkpoint_saved_fraction(saved_fraction)
         _perturb(model)
         graphdef, params, rest = nnx.split(model, nnx.Param, ...)
 
@@ -253,13 +262,37 @@ def test_ordered_checkpointing_matches_plain_gradients(ordered_mode):
         return value, dict(nnx.to_flat_state(grads))
 
     plain_loss, plain = loss_and_grads("none")
-    ordered_loss, ordered = loss_and_grads(ordered_mode)
+    ordered_loss, ordered = loss_and_grads(ordered_mode, every_n, saved_fraction)
     np.testing.assert_allclose(ordered_loss, plain_loss, rtol=1e-6)
     assert ordered.keys() == plain.keys()
     for path in plain:
         np.testing.assert_allclose(
             ordered[path][...], plain[path][...], rtol=1e-4, atol=1e-6, err_msg=str(path)
         )
+
+
+def test_partial_ordered_checkpointing_keeps_other_blocks_ordered():
+    """Blocks between recomputed ones keep residuals but stay ordered."""
+    modes = [
+        block_activation_checkpoint_mode(
+            mode="ordered",
+            modules=("encoder",),
+            module="encoder",
+            block_idx=block_idx,
+            every_n=3,
+        )
+        for block_idx in range(1, 7)
+    ]
+    assert modes == ["ordered_saved", "ordered_saved", "ordered"] * 2
+    saved = [
+        every_nth_checkpoint_mode("ordered", block_idx=block_idx, every_n=1, saved_fraction=1 / 3)
+        for block_idx in range(1, 7)
+    ]
+    assert saved == ["ordered", "ordered", "ordered_saved"] * 2
+    assert every_nth_checkpoint_mode("full", block_idx=1, every_n=2) == "none"
+    assert block_activation_checkpoint_mode(
+        mode="ordered", modules=("encoder",), module="predictor", block_idx=3, every_n=1
+    ) == "none"
 
 
 def test_dual_encoder_paths_agree():
@@ -295,14 +328,21 @@ def test_peak_count_stages_set_capacities():
         "jepa_mask_strategy": ["random"],
         "num_peaks_schedule": (31, 63),
         "gradient_accumulation_steps_schedule": (1, 2),
+        "activation_checkpoint_saved_fraction_schedule": (0.5, 0.0),
     })
     stages = jepa_mask_stages(config)
-    assert [(stage.num_peaks, stage.gradient_accumulation_steps) for stage in stages] == [
-        (31, 1), (63, 2),
-    ]
+    assert [
+        (stage.num_peaks, stage.gradient_accumulation_steps, stage.activation_checkpoint_saved_fraction)
+        for stage in stages
+    ] == [(31, 1, 0.5), (63, 2, 0.0)]
     assert [stage.context_fraction for stage in stages] == [0.6, 0.6]
     # Encoder: context + CLS; predictor: context + target union + CLS.
     assert pairmixer_fast_stage_capacities(config) == ((20, 28, 8), (39, 55, 16))
+    config.fastmixer_predictor_capacity_multiple = 4
+    assert pairmixer_fast_stage_capacities(config) == ((20, 28, 8), (39, 56, 16))
+    config.fastmixer_predictor_capacity_multiple = 128
+    # Never beyond every peak plus CLS.
+    assert pairmixer_fast_stage_capacities(config) == ((20, 32, 8), (39, 64, 16))
     config.num_peaks = 47
     with pytest.raises(ValueError, match="largest num_peaks_schedule"):
         jepa_mask_stages(config)

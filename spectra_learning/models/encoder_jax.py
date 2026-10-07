@@ -15,8 +15,8 @@ from spectra_learning.models.common_jax import (
     RMSNorm,
     activation_checkpoint,
     assign_param,
+    block_activation_checkpoint_mode,
     merge_visible_mask,
-    should_activation_checkpoint,
 )
 from spectra_learning.models.pairmixer_jax import (
     PairFeatureEmbedder,
@@ -135,6 +135,7 @@ class PeakSetEncoder(nnx.Module):
         pairmixer_fast_max_visible_tokens: int | None = None,
         activation_checkpoint_mode: str = "none",
         activation_checkpoint_every_n_layers: int = 1,
+        activation_checkpoint_saved_fraction: float = 0.0,
         activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor"),
         metadata_schema: str | None = None,
         metadata_conditioning: str = "additive",
@@ -174,6 +175,7 @@ class PeakSetEncoder(nnx.Module):
         self.pairmixer_fast_max_visible_tokens = pairmixer_fast_max_visible_tokens
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
+        self.activation_checkpoint_saved_fraction = activation_checkpoint_saved_fraction
         self.activation_checkpoint_modules = activation_checkpoint_modules
         self.embedder = embedder
         if self.metadata_conditioning in {"adaln_zero", "precursor_edge"}:
@@ -446,15 +448,17 @@ class PeakSetEncoder(nnx.Module):
             )
         else:
             for block_idx, block in enumerate(self.blocks, start=1):
-                if should_activation_checkpoint(
+                checkpoint_mode = block_activation_checkpoint_mode(
                     mode=self.activation_checkpoint_mode,
                     modules=self.activation_checkpoint_modules,
                     module="encoder",
                     block_idx=block_idx,
                     every_n=self.activation_checkpoint_every_n_layers,
-                ):
+                    saved_fraction=self.activation_checkpoint_saved_fraction,
+                )
+                if checkpoint_mode != "none":
                     x, z = activation_checkpoint(
-                        _call_pair_mixer_block, self.activation_checkpoint_mode
+                        _call_pair_mixer_block, checkpoint_mode
                     )(block, x, z, token_visible_mask, token_visible_mask)
                 else:
                     x, z = cast(PairMixerBlock, block)(
@@ -585,15 +589,17 @@ class PeakSetEncoder(nnx.Module):
     ) -> Array:
         blocks = self.blocks if num_blocks is None else self.blocks[:num_blocks]
         for block_idx, block in enumerate(blocks, start=1):
-            if should_activation_checkpoint(
+            checkpoint_mode = block_activation_checkpoint_mode(
                 mode=self.activation_checkpoint_mode,
                 modules=self.activation_checkpoint_modules,
                 module="encoder",
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
-            ):
+                saved_fraction=self.activation_checkpoint_saved_fraction,
+            )
+            if checkpoint_mode != "none":
                 x = activation_checkpoint(
-                    _call_single_mixer_block, self.activation_checkpoint_mode
+                    _call_single_mixer_block, checkpoint_mode
                 )(block, x, token_visible_mask, token_positions, condition)
             else:
                 x = cast(SingleMixerBlock, block)(
@@ -617,15 +623,17 @@ class PeakSetEncoder(nnx.Module):
         dense_pair_shape = z.shape
         z = _gather_pair(z, idx)
         for block_idx, block in enumerate(self.blocks, start=1):
-            if should_activation_checkpoint(
+            checkpoint_mode = block_activation_checkpoint_mode(
                 mode=self.activation_checkpoint_mode,
                 modules=self.activation_checkpoint_modules,
                 module="encoder",
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
-            ):
+                saved_fraction=self.activation_checkpoint_saved_fraction,
+            )
+            if checkpoint_mode != "none":
                 x, z = activation_checkpoint(
-                    _call_fast_pair_mixer_block, self.activation_checkpoint_mode
+                    _call_fast_pair_mixer_block, checkpoint_mode
                 )(block, x, z, idx, compact_token_mask, token_visible_mask)
             else:
                 x, z = block.fastmixer_compact_call(
@@ -660,16 +668,18 @@ class PeakSetEncoder(nnx.Module):
         x = x * compact_token_mask[..., None].astype(x.dtype)
         z = _gather_pair(z, idx)
         for block_idx, block in enumerate(self.blocks, start=1):
-            if should_activation_checkpoint(
+            checkpoint_mode = block_activation_checkpoint_mode(
                 mode=self.activation_checkpoint_mode,
                 modules=self.activation_checkpoint_modules,
                 module="encoder",
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
-            ):
+                saved_fraction=self.activation_checkpoint_saved_fraction,
+            )
+            if checkpoint_mode != "none":
                 x, z = activation_checkpoint(
                     _call_fast_pair_mixer_block_compact_only,
-                    self.activation_checkpoint_mode,
+                    checkpoint_mode,
                 )(block, x, z, compact_token_mask, idx)
             else:
                 x, z = block.fastmixer_compact_only_call(
@@ -854,6 +864,7 @@ class PairOnlyEncoder(nnx.Module):
         self.activation_checkpoint_mode = cfg.activation_checkpoint_mode
         self.activation_checkpoint_modules = cfg.activation_checkpoint_modules
         self.activation_checkpoint_every_n_layers = cfg.activation_checkpoint_every_n_layers
+        self.activation_checkpoint_saved_fraction = cfg.activation_checkpoint_saved_fraction
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=None,
             pair_dim=pair_dim,
@@ -950,6 +961,7 @@ class PairOnlyEncoder(nnx.Module):
                 if "encoder" in self.activation_checkpoint_modules else "none"
             ),
             checkpoint_every_n=self.activation_checkpoint_every_n_layers,
+            checkpoint_saved_fraction=self.activation_checkpoint_saved_fraction,
         )
         if self.final_pair_norm is not None:
             pair = self.final_pair_norm(pair)

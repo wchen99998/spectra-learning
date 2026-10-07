@@ -94,8 +94,14 @@ def get_config() -> config_dict.ConfigDict:
     # Masking, masked m/z and distance supervision
     cfg.mae_loss_weight = 0.7
     cfg.distogram_loss_weight = 0.3
+    # Multi-scale CE stays off: in the pilot (wave 10) it cost single/pair AUC
+    # and retrieval in every seed (docs/pair_single_dual_20261001.md, Section 14).
     cfg.distogram_multiscale_weight = 0.0
     cfg.distogram_multiscale_widths = ()
+    # Score the 0.1 Da distogram (10,000 bins) 8192 pairs at a time. At stage 2
+    # this drops 4.5 GB of f32 logits but the step peak sits in the predictor
+    # backward, so peak memory falls only 0.5 GB (72.7 -> 72.2 GB, 1 node).
+    cfg.distogram_ce_chunk_rows = 8192
     cfg.jepa_allow_target_overlap = False
     cfg.jepa_block_min_len = 1
     cfg.jepa_context_fraction = 0.6
@@ -201,6 +207,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_every_n_layers = 1
     cfg.activation_checkpoint_mode = 'ordered'
     cfg.activation_checkpoint_modules = ('encoder', 'predictor', 'distogram')
+    # Stage 1 keeps the residuals of 40% of the blocks (72 GB peak); stage 2
+    # already needs 73 GB with every block recomputed.
+    cfg.activation_checkpoint_saved_fraction_schedule = (0.4, 0.0)
+    # Stage-2 predictor capacity 55 -> 56: one pair-predictor block runs
+    # 150 ms instead of 163 ms (fwd+bwd, 128 spectra, GH200); the whole
+    # stage-2 step gains only 0.5% (139.2 -> 139.9 spectra/s per node,
+    # peak 72.2 -> 73.7 GB).
+    cfg.fastmixer_predictor_capacity_multiple = 4
     cfg.activation_checkpoint_preserve_rng_state = True
 
     # Validation, checkpoint cadence, and logging

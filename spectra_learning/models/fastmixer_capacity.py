@@ -98,6 +98,13 @@ def _mae_fast_capacities(
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
         target_max_visible = max(target_max_visible, target_len)
+    # Pad the predictor axis to a multiple the GPU kernels tile well (55 -> 56
+    # tokens makes a pair-predictor block 8% faster on GH200). The padded slots
+    # are masked, so the outputs are unchanged.
+    multiple = int(config.get("fastmixer_predictor_capacity_multiple", 1))
+    predictor_max_visible = min(
+        -(-predictor_max_visible // multiple) * multiple, full_visible
+    )
     return encoder_max_visible, predictor_max_visible, target_max_visible
 
 

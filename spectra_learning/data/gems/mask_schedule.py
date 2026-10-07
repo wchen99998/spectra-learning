@@ -15,6 +15,7 @@ class JepaMaskStage:
     target_fraction: float
     gradient_accumulation_steps: int
     num_peaks: int
+    activation_checkpoint_saved_fraction: float
 
 
 SCHEDULE_KEYS = (
@@ -24,6 +25,9 @@ SCHEDULE_KEYS = (
     # Peak-count stages (e.g. 31 peaks, then 63). The model is built for
     # config.num_peaks, which must be the largest stage.
     "num_peaks_schedule",
+    # Under ordered remat, this fraction of blocks keeps its residuals
+    # instead of recomputing: stages with spare memory trade it for speed.
+    "activation_checkpoint_saved_fraction_schedule",
 )
 
 
@@ -35,6 +39,7 @@ def jepa_mask_stages(config: Any) -> tuple[JepaMaskStage, ...]:
         config.get("jepa_target_fraction", 0.25),
         config.get("gradient_accumulation_steps", 1),
         max_num_peaks,
+        config.get("activation_checkpoint_saved_fraction", 0.0),
     )
     schedules = [
         tuple(config.get(key, (default,) * num_stages))
@@ -45,8 +50,15 @@ def jepa_mask_stages(config: Any) -> tuple[JepaMaskStage, ...]:
     if max(schedules[3]) != max_num_peaks:
         raise ValueError("num_peaks must equal the largest num_peaks_schedule value")
     return tuple(
-        JepaMaskStage(index, float(context), float(target), int(accumulation), int(peaks))
-        for index, (context, target, accumulation, peaks) in enumerate(
+        JepaMaskStage(
+            index,
+            float(context),
+            float(target),
+            int(accumulation),
+            int(peaks),
+            float(saved_fraction),
+        )
+        for index, (context, target, accumulation, peaks, saved_fraction) in enumerate(
             zip(*schedules, strict=True)
         )
     )

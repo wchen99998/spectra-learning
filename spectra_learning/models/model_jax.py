@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 from typing import Any
 
 import jax
@@ -16,6 +17,7 @@ from spectra_learning.models.common_jax import (
     RMSNorm,
     activation_checkpoint,
     assign_param,
+    block_activation_checkpoint_mode,
     gelu,
     resolve_jax_compute_dtype,
     should_activation_checkpoint,
@@ -137,6 +139,7 @@ def build_peak_set_encoder_jax(
         activation_checkpoint_every_n_layers=(
             cfg.activation_checkpoint_every_n_layers
         ),
+        activation_checkpoint_saved_fraction=cfg.activation_checkpoint_saved_fraction,
         activation_checkpoint_modules=cfg.activation_checkpoint_modules,
         compute_dtype=compute_dtype,
         rngs=rngs,
@@ -302,6 +305,7 @@ class PeakSetJEPAJax(nnx.Module):
             int(width) for width in cfg.distogram_multiscale_widths
         )
         self.distogram_multiscale_weight = float(cfg.distogram_multiscale_weight)
+        self.distogram_ce_chunk_rows = int(cfg.distogram_ce_chunk_rows)
         self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
@@ -348,6 +352,7 @@ class PeakSetJEPAJax(nnx.Module):
         )
         self.activation_checkpoint_mode = cfg.activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = cfg.activation_checkpoint_every_n_layers
+        self.activation_checkpoint_saved_fraction = cfg.activation_checkpoint_saved_fraction
         self.activation_checkpoint_modules = cfg.activation_checkpoint_modules
         self.compute_dtype = resolve_jax_compute_dtype(cfg.autocast_dtype)
 
@@ -575,6 +580,13 @@ class PeakSetJEPAJax(nnx.Module):
         if self.encoder.use_pair_path and not self.is_pair_distogram:
             for block in self.encoder.blocks:
                 block.fastmixer_max_visible_tokens = encoder_tokens
+
+    def set_activation_checkpoint_saved_fraction(self, saved_fraction: float) -> None:
+        for _path, node in nnx.iter_graph(self):
+            if isinstance(node, nnx.Module) and hasattr(
+                node, "activation_checkpoint_saved_fraction"
+            ):
+                node.activation_checkpoint_saved_fraction = saved_fraction
 
     def __call__(
         self,
@@ -1234,6 +1246,7 @@ class PeakSetJEPAJax(nnx.Module):
                 if "predictor" in self.activation_checkpoint_modules else "none"
             ),
             checkpoint_every_n=self.activation_checkpoint_every_n_layers,
+            checkpoint_saved_fraction=self.activation_checkpoint_saved_fraction,
         )
         if self.predictor_pair_norm is not None:
             predicted = self.predictor_pair_norm(predicted)
@@ -1288,9 +1301,15 @@ class PeakSetJEPAJax(nnx.Module):
             if self._use_distogram_multiscale
             else (1,)
         )
-        # These logits are the largest tensor in the step - 2,000 classes on
-        # every pair - so recomputing them in the backward is usually a better
-        # trade than holding them, unlike a per-token head where it is not.
+        if self.distogram_ce_chunk_rows > 0:
+            return _chunked_distogram_score_rows(
+                self.distogram_head, features, targets, widths,
+                self.distogram_ce_chunk_rows,
+            )
+        # These logits are the largest tensor in the step - one row of
+        # distogram_num_bins classes per pair - so recomputing them in the
+        # backward is usually a better trade than holding them, unlike a
+        # per-token head where it is not.
         score = (
             activation_checkpoint(
                 _distogram_score_rows,
@@ -1350,15 +1369,17 @@ class PeakSetJEPAJax(nnx.Module):
     ) -> Array:
         memory = self.encoder_to_predictor_proj(memory)
         for block_idx, block in enumerate(self.masked_latent_predictor, start=1):
-            if should_activation_checkpoint(
+            checkpoint_mode = block_activation_checkpoint_mode(
                 mode=self.activation_checkpoint_mode,
                 modules=self.activation_checkpoint_modules,
                 module="predictor",
                 block_idx=block_idx,
                 every_n=self.activation_checkpoint_every_n_layers,
-            ):
+                saved_fraction=self.activation_checkpoint_saved_fraction,
+            )
+            if checkpoint_mode != "none":
                 query = activation_checkpoint(
-                    _call_cross_attention_block, self.activation_checkpoint_mode
+                    _call_cross_attention_block, checkpoint_mode
                 )(
                     block,
                     query,
@@ -2333,6 +2354,44 @@ def _distogram_score_rows(
     widths: tuple[int, ...],
 ) -> dict[int, Array]:
     return _grouped_marginal_ce_rows(head(pair_features), targets, widths)
+
+
+def _chunked_distogram_score_rows(
+    head: Linear,
+    pair_features: Array,
+    targets: Array,
+    widths: tuple[int, ...],
+    chunk_rows: int,
+) -> dict[int, Array]:
+    """`_distogram_score_rows` over chunks of ``chunk_rows`` pairs.
+
+    Each chunk's logits are recomputed in the backward pass and the head's
+    gradient is accumulated inside the loop, so only one chunk of
+    ``[chunk_rows, num_bins]`` logits is ever live instead of every pair's.
+    """
+    rows = targets.size
+    dim = pair_features.shape[-1]
+    num_chunks = -(-rows // chunk_rows)
+    padding = num_chunks * chunk_rows - rows
+    features = jnp.pad(pair_features.reshape(rows, dim), ((0, padding), (0, 0)))
+    flat_targets = jnp.pad(targets.reshape(rows), (0, padding))
+    graphdef, state = nnx.split(head)
+
+    @jax.checkpoint
+    def score_chunk(state: nnx.State, chunk: tuple[Array, Array]) -> dict[int, Array]:
+        return _distogram_score_rows(nnx.merge(graphdef, state), *chunk, widths)
+
+    scored = jax.lax.map(
+        partial(score_chunk, state),
+        (
+            features.reshape(num_chunks, chunk_rows, dim),
+            flat_targets.reshape(num_chunks, chunk_rows),
+        ),
+    )
+    return {
+        width: value.reshape(-1)[:rows].reshape(targets.shape)
+        for width, value in scored.items()
+    }
 
 
 def _grouped_marginal_ce_rows(

@@ -48,6 +48,8 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     data_keys = set(asdict(GemsDataConfig.from_config(config)))
 
     assert model_keys - set(config) == {
+        "activation_checkpoint_saved_fraction",
+        "distogram_ce_chunk_rows",
         "distogram_mz_max",
         "encoder_mz_scale",
         "encoder_metadata_condition_dim",
@@ -66,6 +68,8 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
         "pairmixer_fourier_x_max",
         "pairmixer_mz_scale",
         "pairmixer_precursor_mz_scale",
+        "pairmixer_triangle_attention_every_n_layers",
+        "pairmixer_triangle_attention_num_heads",
         "predictor_target_max_tokens",
     }
     assert data_keys - set(config) == {

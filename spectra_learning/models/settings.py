@@ -89,6 +89,8 @@ class PeakSetJEPASettings:
     distogram_pair_dim: int | None = None
     distogram_multiscale_widths: tuple[int, ...] = ()
     distogram_multiscale_weight: float = 0.0
+    # Rows per chunk of the distogram head + cross entropy; 0 scores all rows at once.
+    distogram_ce_chunk_rows: int = 0
     latent_pair_loss_weight: float = 0.0
     distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
@@ -152,6 +154,9 @@ class PeakSetJEPASettings:
     ema_teacher_schedule: str = "constant"
     activation_checkpoint_mode: str = "none"
     activation_checkpoint_every_n_layers: int = 1
+    # Ordered modes only: this fraction of blocks, spread evenly, keeps its
+    # residuals instead of recomputing.
+    activation_checkpoint_saved_fraction: float = 0.0
     activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor")
     autocast_dtype: str = "none"
     encoder_metadata_schema: str | None = None

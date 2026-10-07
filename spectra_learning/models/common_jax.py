@@ -149,6 +149,43 @@ def _floating_barrier(tree: Any) -> Any:
     return jax.tree.unflatten(treedef, leaves)
 
 
+def block_activation_checkpoint_mode(
+    *,
+    mode: str,
+    modules: tuple[str, ...],
+    module: str,
+    block_idx: int,
+    every_n: int,
+    saved_fraction: float = 0.0,
+) -> str:
+    """The checkpoint mode for one block, or ``"none"`` to call it directly."""
+    if module not in modules:
+        return "none"
+    return every_nth_checkpoint_mode(
+        mode, block_idx=block_idx, every_n=every_n, saved_fraction=saved_fraction
+    )
+
+
+def every_nth_checkpoint_mode(
+    mode: str, *, block_idx: int, every_n: int, saved_fraction: float = 0.0
+) -> str:
+    """Every ``every_n``-th block recomputes.
+
+    Under the ordered modes the blocks in between keep their residuals
+    (``"ordered_saved"``) instead of running unwrapped, so their backward
+    stays ordered and their weight-gradient GEMMs are not deferred.
+    ``saved_fraction`` of the blocks, spread evenly, also keep their
+    residuals: spare memory buys back part of the recompute.
+    """
+    if mode in ORDERED_CHECKPOINT_MODES and math.floor(
+        block_idx * saved_fraction
+    ) > math.floor((block_idx - 1) * saved_fraction):
+        return "ordered_saved"
+    if mode == "none" or block_idx % every_n == 0:
+        return mode
+    return "ordered_saved" if mode in ORDERED_CHECKPOINT_MODES else "none"
+
+
 def should_activation_checkpoint(
     *,
     mode: str,
@@ -157,7 +194,16 @@ def should_activation_checkpoint(
     block_idx: int,
     every_n: int,
 ) -> bool:
-    return mode != "none" and module in modules and block_idx % every_n == 0
+    return (
+        block_activation_checkpoint_mode(
+            mode=mode,
+            modules=modules,
+            module=module,
+            block_idx=block_idx,
+            every_n=every_n,
+        )
+        != "none"
+    )
 
 
 class Linear(nnx.Module):

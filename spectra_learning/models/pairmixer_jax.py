@@ -16,6 +16,7 @@ from spectra_learning.models.common_jax import (
     Linear,
     RMSNorm,
     activation_checkpoint,
+    every_nth_checkpoint_mode,
     pair_mask,
     scaled_dot_product_attention,
     silu,
@@ -1236,11 +1237,18 @@ def run_pair_only_blocks(
     *,
     checkpoint_mode: str,
     checkpoint_every_n: int,
+    checkpoint_saved_fraction: float = 0.0,
 ) -> Array:
     for index, block in enumerate(blocks, start=1):
         call = _call_pair_only_block
-        if checkpoint_mode != "none" and index % checkpoint_every_n == 0:
-            call = activation_checkpoint(call, checkpoint_mode)
+        mode = every_nth_checkpoint_mode(
+            checkpoint_mode,
+            block_idx=index,
+            every_n=checkpoint_every_n,
+            saved_fraction=checkpoint_saved_fraction,
+        )
+        if mode != "none":
+            call = activation_checkpoint(call, mode)
         pair = call(block, pair, token_mask, condition)
     return pair
 
