@@ -217,6 +217,39 @@ def test_emergency_checkpoint_monitor_reinstalls_sigterm_handler(monkeypatch):
     assert installed == [(signal.SIGTERM, monitor._handle_sigterm)]
 
 
+@pytest.mark.parametrize(
+    ("env", "exit_when_durable"),
+    [
+        ({"SLURM_JOB_ID": "1"}, True),
+        ({"SLURM_JOB_ID": "1", "SKYPILOT_CLUSTER_INFO": '{"cloud": "gcp"}'}, False),
+        ({}, False),
+    ],
+)
+def test_emergency_checkpoint_monitor_exits_only_under_plain_slurm(
+    monkeypatch, env, exit_when_durable
+):
+    for key in ("SLURM_JOB_ID", "SKYPILOT_CLUSTER_INFO"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    monitor = EmergencyCheckpointMonitor.for_current_environment()
+
+    assert monitor._exit_when_durable is exit_when_durable
+
+
+def test_emergency_checkpoint_monitor_exits_when_durable(monkeypatch):
+    exits = []
+    monkeypatch.setattr(os, "_exit", exits.append)
+    monitor = EmergencyCheckpointMonitor(
+        watch_gce_metadata=False, exit_when_durable=True
+    )
+
+    monitor.wait_for_forced_termination()
+
+    assert exits == [0]
+
+
 def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     mesh = Mesh(np.asarray(jax.devices()), ("data",))
     replicated = NamedSharding(mesh, P())
@@ -858,6 +891,37 @@ def test_jax_process_bool_broadcast_uses_multihost_collective(monkeypatch):
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
     assert _jax_process_bool_broadcast(False) is True
     assert calls == [(1, True), (0, False)]
+
+
+def test_multiprocess_emergency_request_lags_one_step(monkeypatch):
+    """Processes act on the previous step's agreement, so the host never waits."""
+    from types import SimpleNamespace
+
+    from spectra_learning.training import pretrain_jax
+
+    started = []
+
+    def fake_any_process_flag(value):
+        started.append(value)
+        return np.asarray(value)
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(pretrain_jax, "_any_process_flag", fake_any_process_flag)
+    loop = SimpleNamespace(
+        emergency_checkpoint=_EmergencyAfterFirstStep(),
+        pending_emergency_request=None,
+    )
+    check = pretrain_jax._JaxTrainingLoop._emergency_checkpoint_requested
+
+    assert [check(loop) for _ in range(3)] == [False, False, True]
+    assert started == [False, True, True]
+
+
+def test_any_process_flag_reduces_over_devices():
+    from spectra_learning.training.pretrain_jax import _any_process_flag
+
+    assert bool(np.asarray(_any_process_flag(True))) is True
+    assert bool(np.asarray(_any_process_flag(False))) is False
 
 
 def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):

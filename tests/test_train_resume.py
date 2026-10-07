@@ -2543,6 +2543,8 @@ def test_run_msg_probe_evaluation_logs_supplied_model_to_standalone_wandb(
         "wandb",
         SimpleNamespace(
             init=fake_init,
+            Settings=lambda **kwargs: kwargs,
+            errors=FakeWandbErrors,
             Image=lambda figure: {"image": figure.__class__.__name__},
             plot=SimpleNamespace(pr_curve=fake_pr_curve),
         ),
@@ -2833,6 +2835,11 @@ def test_load_resume_covariance_pooler_state_requires_sidecar_key():
             load_resume_covariance_pooler_state(pooler, path, ckpt)
 
 
+class FakeWandbErrors:
+    class CommError(Exception):
+        pass
+
+
 def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path):
     class FakeRun:
         def __init__(self) -> None:
@@ -2860,7 +2867,9 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
     monkeypatch.setitem(
         sys.modules,
         "wandb",
-        SimpleNamespace(init=fake_init, Settings=FakeSettings),
+        SimpleNamespace(
+            init=fake_init, Settings=FakeSettings, errors=FakeWandbErrors
+        ),
     )
     cfg = config_dict.ConfigDict()
     cfg.enable_wandb = True
@@ -2873,7 +2882,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
     assert init_calls[0]["project"] == "test-project"
     assert init_calls[0]["config"] == config_to_dict(cfg)
     assert fake_run.finished is True
-    assert "settings" not in init_calls[0]
+    assert init_calls[0]["settings"].kwargs == {"init_timeout": 300.0}
     assert fake_run.definitions == [
         (("global_step",), {}),
         (("train/*",), {"step_metric": "global_step"}),
@@ -2904,7 +2913,9 @@ def test_wandb_logger_uses_non_primary_shared_settings(monkeypatch, tmp_path: Pa
     monkeypatch.setitem(
         sys.modules,
         "wandb",
-        SimpleNamespace(init=fake_init, Settings=FakeSettings),
+        SimpleNamespace(
+            init=fake_init, Settings=FakeSettings, errors=FakeWandbErrors
+        ),
     )
     cfg = config_dict.ConfigDict()
     cfg.enable_wandb = True
@@ -2917,11 +2928,54 @@ def test_wandb_logger_uses_non_primary_shared_settings(monkeypatch, tmp_path: Pa
     WandbMetricLogger(cfg, tmp_path)
 
     assert init_calls[0]["settings"].kwargs == {
+        "init_timeout": 300.0,
         "mode": "shared",
         "x_label": "probe_step_100",
         "x_primary": False,
         "x_update_finish_state": False,
     }
+
+
+def test_wandb_logger_falls_back_to_offline_when_init_fails(
+    monkeypatch, tmp_path: Path
+):
+    class FakeRun:
+        def define_metric(self, *args, **kwargs) -> None:
+            pass
+
+    init_calls = []
+
+    def fake_init(**kwargs):
+        init_calls.append(kwargs)
+        if kwargs.get("mode") != "offline":
+            raise FakeWandbErrors.CommError("Timed out while retrying")
+        return FakeRun()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        SimpleNamespace(
+            init=fake_init,
+            Settings=lambda **kwargs: kwargs,
+            errors=FakeWandbErrors,
+            teardown=lambda: init_calls.append("teardown"),
+        ),
+    )
+    cfg = config_dict.ConfigDict()
+    cfg.enable_wandb = True
+    cfg.wandb_project = "test-project"
+    cfg.wandb_kwargs = {"id": "run-1", "resume": "allow"}
+
+    logger = WandbMetricLogger(cfg, tmp_path)
+
+    assert isinstance(logger.experiment, FakeRun)
+    online, teardown, offline = init_calls
+    assert online["settings"] == {"init_timeout": 300.0}
+    assert teardown == "teardown"
+    assert offline["mode"] == "offline"
+    assert offline["id"] == "run-1"
+    assert offline["dir"] == str(tmp_path)
+    assert "settings" not in offline
 
 
 def test_serialise_metrics_expands_pr_curves_for_wandb(monkeypatch):

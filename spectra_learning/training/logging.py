@@ -1,4 +1,5 @@
 import csv
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,12 @@ class WandbMetricLogger(MetricLogger):
 
         finalize_config(config)
         wandb_kwargs = _build_wandb_init_kwargs(config)
+        settings_kwargs: dict[str, Any] = {
+            "init_timeout": float(config.get("wandb_init_timeout", 300.0))
+        }
         if _use_wandb_shared_mode(config):
             primary = bool(config.get("wandb_shared_primary", True))
-            settings_kwargs: dict[str, Any] = {
+            settings_kwargs |= {
                 "mode": "shared",
                 "x_primary": primary,
                 "x_label": str(
@@ -73,13 +77,23 @@ class WandbMetricLogger(MetricLogger):
                 settings_kwargs["x_update_finish_state"] = bool(
                     config.get("wandb_shared_update_finish_state", False)
                 )
-            wandb_kwargs["settings"] = wandb.Settings(**settings_kwargs)
-        self._run = wandb.init(
-            project=config.get("wandb_project", "md4"),
-            dir=str(workdir),
-            config=config_to_dict(config),
+        init_kwargs = {
+            "project": config.get("wandb_project", "md4"),
+            "dir": str(workdir),
+            "config": config_to_dict(config),
             **wandb_kwargs,
-        )
+        }
+        try:
+            self._run = wandb.init(
+                settings=wandb.Settings(**settings_kwargs), **init_kwargs
+            )
+        except wandb.errors.CommError:
+            # A congested network should not kill a multi-node job at start:
+            # log to an offline run instead (upload it later with `wandb sync`).
+            logging.exception("wandb.init failed; logging offline to %s", workdir)
+            # The failed run still holds its id in the wandb service.
+            wandb.teardown()
+            self._run = wandb.init(mode="offline", **init_kwargs)
         self._run.define_metric("global_step")
         self._run.define_metric("train/*", step_metric="global_step")
         self._run.define_metric("val/*", step_metric="global_step")

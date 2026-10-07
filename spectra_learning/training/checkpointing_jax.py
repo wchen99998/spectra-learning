@@ -26,8 +26,11 @@ _GCE_METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 class EmergencyCheckpointMonitor:
     """Turn VM termination notices into a durable checkpoint request."""
 
-    def __init__(self, *, watch_gce_metadata: bool) -> None:
+    def __init__(
+        self, *, watch_gce_metadata: bool, exit_when_durable: bool = False
+    ) -> None:
         self._watch_gce_metadata = watch_gce_metadata
+        self._exit_when_durable = exit_when_durable
         self._requested = threading.Event()
         self._stopped = threading.Event()
         self._reason: str | None = None
@@ -40,7 +43,13 @@ class EmergencyCheckpointMonitor:
             cluster_info is not None
             and json.loads(cluster_info).get("cloud", "").lower() == "gcp"
         )
-        return cls(watch_gce_metadata=watch_gce_metadata)
+        # Nothing tears down a Slurm job after its warning signal, so idling
+        # until the time limit would only hold the nodes.
+        exit_when_durable = cluster_info is None and "SLURM_JOB_ID" in os.environ
+        return cls(
+            watch_gce_metadata=watch_gce_metadata,
+            exit_when_durable=exit_when_durable,
+        )
 
     def __enter__(self) -> EmergencyCheckpointMonitor:
         self._previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
@@ -77,6 +86,14 @@ class EmergencyCheckpointMonitor:
             self._requested.set()
 
     def wait_for_forced_termination(self) -> None:
+        if self._exit_when_durable:
+            logging.warning("Emergency checkpoint is durable; exiting.")
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            # Skip interpreter teardown: distributed shutdown and wandb
+            # finalisation can block after the peers have already left.
+            os._exit(0)
+            return
         logging.warning(
             "Emergency checkpoint is durable; waiting for the VM to terminate."
         )

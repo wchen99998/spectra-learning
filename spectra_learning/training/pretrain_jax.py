@@ -1433,6 +1433,23 @@ def _jax_training_deadline(config: config_dict.ConfigDict) -> float | None:
     return deadline
 
 
+@cache
+def _any_process_flag_reducer() -> tuple[NamedSharding, Any]:
+    mesh = Mesh(np.asarray(jax.devices()), ("flag",))
+    reduce_any = jax.jit(jnp.max, out_shardings=NamedSharding(mesh, P()))
+    return NamedSharding(mesh, P("flag")), reduce_any
+
+
+def _any_process_flag(value: bool) -> Array:
+    """Starts an OR of ``value`` over processes without waiting for it."""
+    sharding, reduce_any = _any_process_flag_reducer()
+    local = np.full(jax.local_device_count(), value, dtype=np.int32)
+    flags = jax.make_array_from_process_local_data(
+        sharding, local, (jax.device_count(),)
+    )
+    return reduce_any(flags)
+
+
 def _jax_process_bool_broadcast(value: bool) -> bool:
     if jax.process_count() == 1:
         return value
@@ -1553,6 +1570,7 @@ class _JaxTrainingLoop:
         self.metric_reduction = metric_reduction
         self.resume_step = resume_step
         self.emergency_checkpoint = emergency_checkpoint
+        self.pending_emergency_request: Array | None = None
 
         self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
         self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
@@ -2133,13 +2151,17 @@ class _JaxTrainingLoop:
     def _emergency_checkpoint_requested(self) -> bool:
         if self.emergency_checkpoint is None:
             return False
-        requested = np.asarray(
-            self.emergency_checkpoint.requested,
-            dtype=np.int32,
-        )
-        if jax.process_count() > 1:
-            requested = multihost_utils.process_allgather(requested)
-        return bool(np.asarray(requested).any())
+        requested = self.emergency_checkpoint.requested
+        if jax.process_count() == 1:
+            return requested
+        # Processes agree through a device collective that runs after the
+        # step just dispatched. Waiting for it would leave the devices idle
+        # while the next batch is loaded and its step launched, so each call
+        # starts the agreement on the current flag and returns the previous
+        # call's: every process still stops at the same step, one step later.
+        previous = self.pending_emergency_request
+        self.pending_emergency_request = _any_process_flag(requested)
+        return previous is not None and bool(np.asarray(previous))
 
     def _save_emergency_checkpoint_and_wait(self) -> None:
         assert self.emergency_checkpoint is not None
