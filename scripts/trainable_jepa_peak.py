@@ -59,11 +59,32 @@ def load_spectra(input_root: Path, data_root: Path, metadata_path: Path):
     }
 
 
+def compact_encode(encoder, packed, num_peaks: int):
+    """Encode at the pretraining slot count and scatter back to the input slots.
+
+    The valid slots (at most ``num_peaks`` per row, m/z-ordered) move to the
+    first ``num_peaks`` positions, so token positions and the trailing CLS
+    position match pretraining; the physical outputs return to their original
+    slots and every other slot is zero.
+    """
+    mask = packed[..., 2].astype(bool)
+    index = jnp.argsort(~mask, axis=1, stable=True)[:, :num_peaks]
+    compact = jnp.take_along_axis(packed[..., :3], index[..., None], axis=1)
+    compact_mask = compact[..., 2].astype(bool)
+    inputs = dict(valid_mask=compact_mask, visible_mask=compact_mask,
+                  precursor_mz=packed[:, 0, 3], spectrum_metadata=packed[:, 0, 4:])
+    tokens = encoder(compact[..., 0], compact[..., 1], **inputs)
+    tokens = tokens[:, :-1] * compact_mask[..., None].astype(tokens.dtype)
+    rows = jnp.arange(packed.shape[0])[:, None]
+    return jnp.zeros((*mask.shape, tokens.shape[-1]), tokens.dtype).at[rows, index].set(tokens)
+
+
 class TrainableJEPAPeak:
     """Functional NNX encoder bridge with the existing Linen readout interface."""
 
     def __init__(self, encoder, out_dim: int, dropout: float, model_dim: int,
-                 adaptation: str = "full"):
+                 adaptation: str = "full", num_peaks: int | None = None,
+                 pair_field: bool = False, tree: bool = False, pair_dim: int | None = None):
         # Match JEPA pretraining: Fourier frequencies named b are fixed buffers,
         # even though the NNX implementation stores them as Param variables.
         self.adaptation = adaptation
@@ -75,28 +96,63 @@ class TrainableJEPAPeak:
             return isinstance(value, nnx.Param) and path[-1] != "b"
         self.graphdef, parameters, self.static = nnx.split(encoder, trainable, ...)
         self.initial_parameters = nnx.to_pure_dict(parameters)
-        self.readout = PeakEncoder(out_dim, dropout)
+        self.pair_field = pair_field
+        if pair_field and num_peaks is None:
+            raise ValueError("The pair field requires the compacted dual encoder")
+        if pair_field:
+            from spectra_learning.probes.massspec.pair_field_jax import PairFieldPeakEncoder
+            self.readout = PairFieldPeakEncoder(out_dim, dropout, tree=tree)
+        else:
+            self.readout = PeakEncoder(out_dim, dropout)
         self.model_dim = model_dim
+        self.pair_dim = pair_dim or model_dim
+        # Pretraining peak count of an encoder fed fewer slots than the
+        # 127-slot input; None keeps the original uncompacted path.
+        self.num_peaks = num_peaks
 
     def init(self, key, tokens, *, train=False):
         parameters, self.initial_parameters = self.initial_parameters, None
-        readout = self.readout.init(key, jnp.zeros((1, tokens.shape[1], self.model_dim)), train=train)
+        shape = (1, tokens.shape[1], self.model_dim)
+        if self.pair_field:
+            from spectra_learning.probes.massspec.pair_field_jax import pair_edge_mask
+            n = tokens.shape[1]
+            readout = self.readout.init(key, jnp.zeros(shape), jnp.zeros((1, n + 1, n, self.pair_dim)),
+                                        pair_edge_mask(jnp.ones((1, n), bool)), train=train)
+        else:
+            readout = self.readout.init(key, jnp.zeros(shape), train=train)
         return {"params": {"encoder": parameters, "readout": readout["params"]}}
 
     def encode(self, parameters, packed, *, frozen=None):
         encoder = nnx.merge(self.graphdef, nnx.State(parameters),
                             self.static if frozen is None else nnx.State(frozen))
         mask = packed[..., 2].astype(bool)
-        tokens = encoder(packed[..., 0], packed[..., 1], valid_mask=mask, visible_mask=mask,
-                         precursor_mz=packed[:, 0, 3], spectrum_metadata=packed[:, 0, 4:])
+        if self.num_peaks is None:
+            tokens = encoder(packed[..., 0], packed[..., 1], valid_mask=mask, visible_mask=mask,
+                             precursor_mz=packed[:, 0, 3], spectrum_metadata=packed[:, 0, 4:])
+            tokens = tokens[:, :-1]
+        elif self.pair_field:
+            # Inputs already use the pretraining slots: [B, N] peaks, CLS last.
+            from spectra_learning.probes.massspec.pair_field_jax import pair_edge_mask
+            if packed.shape[1] != self.num_peaks:
+                raise ValueError("The pair field expects inputs compacted to the pretraining slots")
+            tokens, pair = encoder.forward_with_pair(
+                packed[..., 0], packed[..., 1], valid_mask=mask, visible_mask=mask,
+                precursor_mz=packed[:, 0, 3], spectrum_metadata=packed[:, 0, 4:])
+            tokens = tokens[:, :-1] * mask[..., None].astype(tokens.dtype)
+            cast = lambda value: value.astype(jnp.float16).astype(jnp.float32)
+            return cast(tokens), cast(pair[:, :, :-1]), pair_edge_mask(mask)
+        else:
+            tokens = compact_encode(encoder, packed, self.num_peaks)
         # Retain the baseline's physical-only float16 storage boundary. Casts
         # remain differentiable; no stop_gradient or cached embeddings are used.
-        return tokens[:, :-1].astype(jnp.float16).astype(jnp.float32)
+        return tokens.astype(jnp.float16).astype(jnp.float32)
 
     def apply(self, variables, tokens, *, train=False, rngs=None, frozen=None):
         params = variables["params"]
         encoded = self.encode(params["encoder"], tokens, frozen=frozen)
-        return self.readout.apply({"params": params["readout"]}, encoded, train=train, rngs=rngs)
+        if not self.pair_field:
+            encoded = (encoded,)
+        return self.readout.apply({"params": params["readout"]}, *encoded, train=train, rngs=rngs)
 
 
 def restore_peak(args):
@@ -112,12 +168,22 @@ def restore_peak(args):
     config.activation_checkpoint_every_n_layers = 1
     encoder_module.MASSIVE_V2_CONDITION_DIM = 28
     settings = PeakSetJEPASettings.from_config(config)
+    # The joint single+pair ``dual`` student keeps the single-stream token
+    # interface; it runs at its pretraining peak count plus CLS.
+    dual = config.training_mode == "dual"
+    num_peaks = settings.num_peaks
+    if dual:
+        # Run at the peak count the inputs were compacted to: the stage the
+        # checkpoint was pretraining in (e.g. 31 peaks before the 63 stage).
+        prepared = json.loads((args.input_root / "embedding_metadata.json").read_text())
+        num_peaks = int(prepared.get("physical_peak_subset", {}).get("num_peaks", num_peaks))
     encoder = nnx.eval_shape(lambda: build_peak_set_encoder_jax(
         settings, compute_dtype=jnp.bfloat16, pairmixer_block_type=settings.pairmixer_block_type,
-        pairmixer_fast_encoder_max_visible_tokens=None, rngs=nnx.Rngs(int(config.seed))))
-    if encoder.use_pair_path or not encoder.use_cls_token:
-        raise ValueError("This experiment requires the original single-stream JEPA student with CLS")
-    sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+        pairmixer_fast_encoder_max_visible_tokens=num_peaks + 1 if dual else None,
+        rngs=nnx.Rngs(int(config.seed))))
+    if encoder.use_pair_path != dual or not encoder.use_cls_token:
+        raise ValueError("Expected the single-stream or dual JEPA student with CLS")
+    sharding = jax.sharding.SingleDeviceSharding(jax.local_devices()[0])
     template = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=sharding),
                             nnx.as_pure(nnx.state(encoder)))
     nnx.update(encoder, restore_jax_encoder_state(args.jepa_checkpoint, template))
@@ -125,7 +191,13 @@ def restore_peak(args):
     if adaptation == "lora":
         from retrieval_lora import install_attention_lora
         install_attention_lora(encoder, rank=args.lora_rank, alpha=args.lora_alpha, seed=args.seed)
-    return TrainableJEPAPeak(encoder, args.d, args.dropout, settings.model_dim, adaptation)
+    pair_field = getattr(args, "pair_field", False)
+    if pair_field and not dual:
+        raise ValueError("The pair field needs a dual student")
+    return TrainableJEPAPeak(encoder, args.d, args.dropout, settings.model_dim, adaptation,
+                             num_peaks=num_peaks if dual else None,
+                             pair_field=pair_field, tree=getattr(args, "tree", False),
+                             pair_dim=settings.pairmixer_pair_dim or settings.model_dim)
 
 
 def validate_initial_tokens(peak, params, packed, mask, input_root, rows):
